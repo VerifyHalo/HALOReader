@@ -1,0 +1,17 @@
+release/main.o
+release/seizure_analyzer.o
+release/fpga_device_dialog.o
+release/file_processor_worker.o
+release/hdf5_reader.o
+release/fpga_logger.o
+release/halo_response_decoder.o
+release/hdf5_writer.o
+release/seizure_detector.o
+release/seizure_processor.o
+release/rhd_reader.o
+release/ok_frontpanel.o
+release/fpga_processor.o
+release/qrc_resources.o
+release/moc_seizure_analyzer.o
+release/moc_fpga_device_dialog.o
+release/moc_file_processor_worker.o

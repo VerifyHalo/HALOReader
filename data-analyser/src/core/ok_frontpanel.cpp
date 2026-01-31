@@ -1,8 +1,13 @@
 #include "ok_frontpanel.h"
-#include <dlfcn.h>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // Forward declarations for C library functions
 typedef void* (*okFrontPanel_Construct_t)();
@@ -18,7 +23,11 @@ typedef unsigned long (*okFrontPanel_GetWireOutValue_t)(void*, int);
 typedef long (*okFrontPanel_WriteToPipeIn_t)(void*, int, long, unsigned char*);
 typedef long (*okFrontPanel_ReadFromPipeOut_t)(void*, int, long, unsigned char*);
 
+#ifdef _WIN32
+static HMODULE g_lib_handle = nullptr;
+#else
 static void* g_lib_handle = nullptr;
+#endif
 static okFrontPanel_Construct_t g_Construct = nullptr;
 static okFrontPanel_Destruct_t g_Destruct = nullptr;
 static okFrontPanel_GetDeviceCount_t g_GetDeviceCount = nullptr;
@@ -35,7 +44,58 @@ static okFrontPanel_ReadFromPipeOut_t g_ReadFromPipeOut = nullptr;
 static bool loadLibrary() {
     if (g_lib_handle) return true;
     
-    // Try to load from lib directory relative to executable
+#ifdef _WIN32
+    // Windows DLL paths - check multiple locations
+    const char* lib_paths[] = {
+        "lib\\okFrontPanel.dll",
+        "lib/okFrontPanel.dll",
+        "..\\lib\\okFrontPanel.dll",
+        "../lib/okFrontPanel.dll",
+        "..\\..\\lib\\okFrontPanel.dll",
+        "../../lib/okFrontPanel.dll",
+        "build\\okFrontPanel.dll",
+        "build/okFrontPanel.dll",
+        "okFrontPanel.dll"
+    };
+    
+    for (const char* path : lib_paths) {
+        g_lib_handle = LoadLibraryA(path);
+        if (g_lib_handle) {
+            std::cerr << "[OK] Loaded library from: " << path << std::endl;
+            break;
+        }
+    }
+    
+    if (!g_lib_handle) {
+        DWORD error = GetLastError();
+        std::cerr << "[OK] Failed to load okFrontPanel.dll (Error: " << error << ")" << std::endl;
+        return false;
+    }
+    
+    // Load function pointers
+    g_Construct = (okFrontPanel_Construct_t)GetProcAddress(g_lib_handle, "okFrontPanel_Construct");
+    g_Destruct = (okFrontPanel_Destruct_t)GetProcAddress(g_lib_handle, "okFrontPanel_Destruct");
+    g_GetDeviceCount = (okFrontPanel_GetDeviceCount_t)GetProcAddress(g_lib_handle, "okFrontPanel_GetDeviceCount");
+    g_GetDeviceListSerial = (okFrontPanel_GetDeviceListSerial_t)GetProcAddress(g_lib_handle, "okFrontPanel_GetDeviceListSerial");
+    g_OpenBySerial = (okFrontPanel_OpenBySerial_t)GetProcAddress(g_lib_handle, "okFrontPanel_OpenBySerial");
+    g_ConfigureFPGA = (okFrontPanel_ConfigureFPGA_t)GetProcAddress(g_lib_handle, "okFrontPanel_ConfigureFPGA");
+    g_SetWireInValue = (okFrontPanel_SetWireInValue_t)GetProcAddress(g_lib_handle, "okFrontPanel_SetWireInValue");
+    g_UpdateWireIns = (okFrontPanel_UpdateWireIns_t)GetProcAddress(g_lib_handle, "okFrontPanel_UpdateWireIns");
+    g_UpdateWireOuts = (okFrontPanel_UpdateWireOuts_t)GetProcAddress(g_lib_handle, "okFrontPanel_UpdateWireOuts");
+    g_GetWireOutValue = (okFrontPanel_GetWireOutValue_t)GetProcAddress(g_lib_handle, "okFrontPanel_GetWireOutValue");
+    g_WriteToPipeIn = (okFrontPanel_WriteToPipeIn_t)GetProcAddress(g_lib_handle, "okFrontPanel_WriteToPipeIn");
+    g_ReadFromPipeOut = (okFrontPanel_ReadFromPipeOut_t)GetProcAddress(g_lib_handle, "okFrontPanel_ReadFromPipeOut");
+    
+    if (!g_Construct || !g_Destruct || !g_GetDeviceCount || !g_GetDeviceListSerial ||
+        !g_OpenBySerial || !g_ConfigureFPGA || !g_SetWireInValue || !g_UpdateWireIns ||
+        !g_UpdateWireOuts || !g_GetWireOutValue || !g_WriteToPipeIn || !g_ReadFromPipeOut) {
+        std::cerr << "[OK] Failed to load required functions from library" << std::endl;
+        FreeLibrary(g_lib_handle);
+        g_lib_handle = nullptr;
+        return false;
+    }
+#else
+    // Unix/macOS library paths
     const char* lib_paths[] = {
         "lib/libokFrontPanel.dylib",
         "../lib/libokFrontPanel.dylib",
@@ -78,6 +138,7 @@ static bool loadLibrary() {
         g_lib_handle = nullptr;
         return false;
     }
+#endif
     
     return true;
 }
@@ -97,6 +158,8 @@ OkFrontPanel::~OkFrontPanel() {
         g_Destruct(handle_);
         handle_ = nullptr;
     }
+    // Note: We don't unload the library here as it may be used by other instances
+    // The library will be unloaded when the process exits
 }
 
 int OkFrontPanel::getDeviceCount() {

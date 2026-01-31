@@ -1,6 +1,7 @@
 #include <QMouseEvent>
 #include "seizure_analyzer.h"
 #include <QApplication>
+#include <QIcon>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -30,13 +31,13 @@
 #include "file_processor_worker.h"
 #include <QDebug>
 #include <QThread>
-#include <QMutexLocker>
 #include <QPainter>
 #include <QPainterPath>
 #include <QDialog>
 #include <QFontMetrics>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 // These GUI display constants must match the FPGA/ASIC datapath configuration.
 // See fpga/halo_seizure datapath `define`s:
@@ -55,17 +56,21 @@ SeizureAnalyzer::SeizureAnalyzer(QWidget *parent)
     , centralWidget(nullptr)
     , updateTimer(nullptr)
     , dataDirectory("")
+    , isUpdating(false)
     , dataWatcher(nullptr)
     , processingTimer(nullptr)
     , processingThread(nullptr)
     , processorWorker(nullptr)
     , isProcessing(false)
 {
+    // Set window icon
+    setWindowIcon(QIcon(":/app_icon.png"));
     setupUI();
     
+    // Create timer for batched channel updates (debounced)
     updateTimer = new QTimer(this);
+    updateTimer->setSingleShot(true); // Only fire once per start
     connect(updateTimer, &QTimer::timeout, this, &SeizureAnalyzer::updateDisplay);
-    updateTimer->start(1000);
     
     // Set up processing timer (check for new files every 1 second)
     processingTimer = new QTimer(this);
@@ -294,6 +299,7 @@ void SeizureAnalyzer::setupUI()
     channelButton = new QPushButton("Select Channels", this);
     channelButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     secondButtonLayout->addWidget(channelButton);
+    
     secondButtonLayout->addStretch();
 
     // Channel popup setup
@@ -386,6 +392,7 @@ void SeizureAnalyzer::reloadData()
 {
     // Clear existing detections
     allDetections.clear();
+    dailyCounts.clear();
     
     // Scan for detection files in the data directory
     if (!dataDirectory.isEmpty()) {
@@ -394,18 +401,36 @@ void SeizureAnalyzer::reloadData()
         processNewRhdFiles();
     }
     updateDisplay();
+    // Update daily counts based on selected channels
+    updateDailyCounts();
 }
 
 void SeizureAnalyzer::updateDisplay()
 {
-    if (!lastUpdateLabel) return; // Safety check
+    // Simple flag check - if already updating, skip
+    if (isUpdating) {
+        return;
+    }
     
+    // Set flag immediately
+    isUpdating = true;
+    
+    // Safety checks
+    if (!dailyCountsTable || !latestDetectionsTable) {
+        isUpdating = false;
+        return;
+    }
+    
+    // Sequential updates - one at a time
     updateSeizureCounts();
     updateLatestDetections();
-    updateDailyCounts();
+    
     if (lastUpdateLabel) {
-    lastUpdateLabel->setText("Last Update: " + QDateTime::currentDateTime().toString("hh:mm:ss"));
+        lastUpdateLabel->setText("Last Update: " + QDateTime::currentDateTime().toString("hh:mm:ss"));
     }
+    
+    // Clear flag
+    isUpdating = false;
 }
 
 bool SeizureAnalyzer::eventFilter(QObject *watched, QEvent *event)
@@ -424,51 +449,98 @@ bool SeizureAnalyzer::eventFilter(QObject *watched, QEvent *event)
 
 void SeizureAnalyzer::updateSeizureCounts()
 {
-    if (!totalSeizuresLabel || !todaySeizuresLabel || !monthlySeizuresLabel) return; // Safety check
-    
-    QList<SeizureRange> channelDetections;
-    for (const SeizureRange &detection : allDetections) {
-        if (!channelSelected(detection.channelIndex)) continue;
-            channelDetections.append(detection);
+    if (!totalSeizuresLabel || !todaySeizuresLabel || !monthlySeizuresLabel) {
+        qWarning() << "updateSeizureCounts: Labels not initialized";
+        return; // Safety check
     }
     
-    int totalSeizures = channelDetections.size();
-    int todaySeizures = 0;
-    int monthlySeizures = 0;
-    
-    QDate today = QDate::currentDate();
-    QString currentMonth = today.toString("yyyy-MM");
-    
-    for (const SeizureRange &detection : channelDetections) {
-        if (detection.start.date() == today) {
-            todaySeizures++;
+    try {
+        qDebug() << "updateSeizureCounts: Processing" << allDetections.size() << "detections";
+        
+        QList<SeizureRange> channelDetections;
+        channelDetections.reserve(allDetections.size()); // Pre-allocate to avoid reallocations
+        
+        for (const SeizureRange &detection : allDetections) {
+            if (!channelSelected(detection.channelIndex)) continue;
+            if (!detection.start.isValid()) continue; // Skip invalid dates
+            channelDetections.append(detection);
         }
         
-        QString detectionMonth = detection.start.date().toString("yyyy-MM");
-        if (detectionMonth == currentMonth) {
-            monthlySeizures++;
+        qDebug() << "updateSeizureCounts: Filtered to" << channelDetections.size() << "channel detections";
+        
+        int totalSeizures = channelDetections.size();
+        int todaySeizures = 0;
+        int monthlySeizures = 0;
+        
+        QDate today = QDate::currentDate();
+        if (!today.isValid()) {
+            qWarning() << "updateSeizureCounts: Invalid today date";
+            return;
         }
+        QString currentMonth = today.toString("yyyy-MM");
+        
+        for (const SeizureRange &detection : channelDetections) {
+            if (!detection.start.isValid()) continue;
+            
+            QDate detDate = detection.start.date();
+            if (!detDate.isValid()) continue;
+            
+            if (detDate == today) {
+                todaySeizures++;
+            }
+            
+            QString detectionMonth = detDate.toString("yyyy-MM");
+            if (detectionMonth == currentMonth) {
+                monthlySeizures++;
+            }
+        }
+        
+        totalSeizuresLabel->setText(QString("Total Seizures: %1").arg(totalSeizures));
+        todaySeizuresLabel->setText(QString("Today: %1").arg(todaySeizures));
+        monthlySeizuresLabel->setText(QString("This Month: %1").arg(monthlySeizures));
+        
+        qDebug() << "updateSeizureCounts: Completed - Total:" << totalSeizures << "Today:" << todaySeizures << "Month:" << monthlySeizures;
+    } catch (const std::exception& e) {
+        qWarning() << "Exception in updateSeizureCounts():" << e.what();
+    } catch (...) {
+        qWarning() << "Unknown exception in updateSeizureCounts()";
     }
-    
-    totalSeizuresLabel->setText(QString("Total Seizures: %1").arg(totalSeizures));
-    todaySeizuresLabel->setText(QString("Today: %1").arg(todaySeizures));
-    monthlySeizuresLabel->setText(QString("This Month: %1").arg(monthlySeizures));
 }
 
 void SeizureAnalyzer::updateDailyCounts()
 {
+    if (!dailyCountsTable) return;
+    
+    // Block signals and disable updates
+    dailyCountsTable->blockSignals(true);
+    dailyCountsTable->setUpdatesEnabled(false);
+    
+    // Clear old data map
     dailyCounts.clear();
+    
+    // Count detections by date for selected channels only
     for (const SeizureRange &detection : allDetections) {
         if (!channelSelected(detection.channelIndex)) continue;
+        if (!detection.start.isValid()) continue;
+        
         QDate date = detection.start.date();
+        if (date.isValid()) {
             dailyCounts[date]++;
+        }
     }
     
-    dailyCountsTable->setRowCount(dailyCounts.size());
-    
+    // Get sorted dates (newest first)
     QList<QDate> dates = dailyCounts.keys();
     std::sort(dates.begin(), dates.end(), std::greater<QDate>());
     
+    // Clear table completely
+    dailyCountsTable->setRowCount(0);
+    dailyCountsTable->clearContents();
+    
+    // Set new row count
+    dailyCountsTable->setRowCount(dates.size());
+    
+    // Populate rows with new data
     for (int i = 0; i < dates.size(); ++i) {
         QDate date = dates[i];
         int count = dailyCounts[date];
@@ -476,17 +548,20 @@ void SeizureAnalyzer::updateDailyCounts()
         dailyCountsTable->setItem(i, 0, new QTableWidgetItem(date.toString("yyyy-MM-dd")));
         dailyCountsTable->setItem(i, 1, new QTableWidgetItem(QString::number(count)));
     }
-
-    // Restore selection if date still exists
+    
+    // Restore selection if valid
     if (selectedDate.isValid()) {
         for (int i = 0; i < dates.size(); ++i) {
             if (dates[i] == selectedDate) {
                 dailyCountsTable->selectRow(i);
-                return;
+                break;
             }
         }
-        selectedDate = QDate(); // clear if not found
     }
+    
+    // Re-enable
+    dailyCountsTable->setUpdatesEnabled(true);
+    dailyCountsTable->blockSignals(false);
 }
 
 void SeizureAnalyzer::onChannelItemChanged(QListWidgetItem *item)
@@ -495,14 +570,16 @@ void SeizureAnalyzer::onChannelItemChanged(QListWidgetItem *item)
     int row = channelList->row(item);
     if (row < 0 || row >= 32) return;
 
+    // Just update the selection set - no automatic update
     if (item->checkState() == Qt::Checked) {
         selectedChannels.insert(row);
     } else {
         selectedChannels.remove(row);
     }
-
-    updateDisplay();
+    
+    // User must click "Reload Data" button to update the display
 }
+
 
 void SeizureAnalyzer::onDailySelectionChanged()
 {
@@ -511,89 +588,99 @@ void SeizureAnalyzer::onDailySelectionChanged()
         selectedDate = QDate();
     } else {
         QModelIndex idx = sel.first();
-        QString dateStr = dailyCountsTable->item(idx.row(), 0)->text();
-        selectedDate = QDate::fromString(dateStr, "yyyy-MM-dd");
+        QTableWidgetItem *item = dailyCountsTable->item(idx.row(), 0);
+        if (item) {
+            QString dateStr = item->text();
+            selectedDate = QDate::fromString(dateStr, "yyyy-MM-dd");
+        } else {
+            selectedDate = QDate();
+        }
     }
     updateLatestDetections();
 }
 
 void SeizureAnalyzer::updateLatestDetections()
 {
-    // Disable updates to prevent Qt from trying to layout while we modify the table
+    if (!latestDetectionsTable) return;
+    
+    // SIMPLE: Block signals and disable updates
+    latestDetectionsTable->blockSignals(true);
     latestDetectionsTable->setUpdatesEnabled(false);
     
-    // If no day selected, show nothing (user must click a day)
-    if (!selectedDate.isValid()) {
-        // Clear existing cell widgets before changing row count
-        int oldRowCount = latestDetectionsTable->rowCount();
-        for (int i = 0; i < oldRowCount; ++i) {
-            QWidget *oldWidget = latestDetectionsTable->cellWidget(i, 5);
-            if (oldWidget) {
-                // Block signals before deletion to prevent disconnect warnings
-                oldWidget->blockSignals(true);
-                latestDetectionsTable->removeCellWidget(i, 5);
-                delete oldWidget; // Delete immediately instead of deleteLater
-            }
+    try {
+        // If no day selected, clear table
+        if (!selectedDate.isValid()) {
+            // Simple clear - let Qt handle it
+            latestDetectionsTable->setRowCount(0);
+            visibleDetections.clear();
+            latestDetectionsTable->setUpdatesEnabled(true);
+            latestDetectionsTable->blockSignals(false);
+            return;
         }
-        latestDetectionsTable->setRowCount(0);
-        visibleDetections.clear();
-        latestDetectionsTable->setUpdatesEnabled(true);
-        return;
-    }
 
-    QList<SeizureRange> channelDetections;
-    for (const SeizureRange &detection : allDetections) {
-        if (!channelSelected(detection.channelIndex)) continue;
-        if (selectedDate.isValid() && detection.start.date() != selectedDate) continue;
+        // Collect matching detections - SIMPLE loop
+        QList<SeizureRange> channelDetections;
+        for (const SeizureRange &detection : allDetections) {
+            if (!channelSelected(detection.channelIndex)) continue;
+            if (detection.start.date() != selectedDate) continue;
             channelDetections.append(detection);
         }
-    std::sort(channelDetections.begin(), channelDetections.end(), 
-              [](const SeizureRange &a, const SeizureRange &b) {
-                  return a.end > b.end;
-              });
-    
-    visibleDetections = channelDetections;
-
-    int count = channelDetections.size();
-    
-    // Clear existing cell widgets before changing row count to prevent crashes
-    int oldRowCount = latestDetectionsTable->rowCount();
-    for (int i = 0; i < oldRowCount; ++i) {
-        QWidget *oldWidget = latestDetectionsTable->cellWidget(i, 5);
-        if (oldWidget) {
-            // Block signals before deletion to prevent disconnect warnings
-            oldWidget->blockSignals(true);
-            latestDetectionsTable->removeCellWidget(i, 5);
-            delete oldWidget; // Delete immediately instead of deleteLater
-        }
-    }
-    
-    latestDetectionsTable->setRowCount(count);
-    
-    for (int i = 0; i < count; ++i) {
-        const SeizureRange &detection = channelDetections[i];
-        latestDetectionsTable->setItem(i, 0, new QTableWidgetItem(QString("A-%1").arg(detection.channelIndex, 3, 10, QChar('0'))));
-        latestDetectionsTable->setItem(i, 1, new QTableWidgetItem(detection.start.toString("yyyy-MM-dd hh:mm:ss.zzz")));
-        latestDetectionsTable->setItem(i, 2, new QTableWidgetItem(detection.end.toString("yyyy-MM-dd hh:mm:ss.zzz")));
-        latestDetectionsTable->setItem(i, 3, new QTableWidgetItem(QString::number(detection.durationSec, 'f', 3)));
-        latestDetectionsTable->setItem(i, 4, new QTableWidgetItem(QFileInfo(detection.filePath).fileName()));
         
-        // Add Open button in 6th column
-        QWidget *btnContainer = new QWidget(latestDetectionsTable);
-        QHBoxLayout *btnLayout = new QHBoxLayout(btnContainer);
-        btnLayout->setContentsMargins(0, 0, 4, 0);
-        btnLayout->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        QPushButton *btn = new QPushButton("Open", btnContainer);
-        btn->setProperty("detIndex", i);
-        btn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        btnLayout->addWidget(btn);
-        btnContainer->setLayout(btnLayout);
-        connect(btn, &QPushButton::clicked, this, &SeizureAnalyzer::onOpenDetectionClicked);
-        latestDetectionsTable->setCellWidget(i, 5, btnContainer);
+        // Sort by end time (newest first)
+        std::sort(channelDetections.begin(), channelDetections.end(), 
+                  [](const SeizureRange &a, const SeizureRange &b) {
+                      return a.end > b.end;
+                  });
+        
+        // Limit to prevent crashes - 500 rows max
+        const int MAX_ROWS = 500;
+        if (channelDetections.size() > MAX_ROWS) {
+            qWarning() << "Too many detections (" << channelDetections.size() << "), limiting to" << MAX_ROWS;
+            channelDetections = channelDetections.mid(0, MAX_ROWS);
+        }
+        
+        visibleDetections = channelDetections;
+        int count = channelDetections.size();
+        
+        // Clear old widgets first
+        int oldCount = latestDetectionsTable->rowCount();
+        for (int i = 0; i < oldCount; ++i) {
+
+            QWidget *w = latestDetectionsTable->cellWidget(i, 5);
+            if (w) {
+                latestDetectionsTable->removeCellWidget(i, 5);
+                w->deleteLater(); // Safer than delete
+            }
+        }
+        
+        // Set row count and clear
+        latestDetectionsTable->setRowCount(count);
+        latestDetectionsTable->clearContents();
+        
+        // Populate rows - limit to prevent crashes
+        for (int i = 0; i < count && i < MAX_ROWS; ++i) {
+            const SeizureRange &det = channelDetections[i];
+            
+            // Create items
+            latestDetectionsTable->setItem(i, 0, new QTableWidgetItem(QString("A-%1").arg(det.channelIndex, 3, 10, QChar('0'))));
+            latestDetectionsTable->setItem(i, 1, new QTableWidgetItem(det.start.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+            latestDetectionsTable->setItem(i, 2, new QTableWidgetItem(det.end.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+            latestDetectionsTable->setItem(i, 3, new QTableWidgetItem(QString::number(det.durationSec, 'f', 3)));
+            latestDetectionsTable->setItem(i, 4, new QTableWidgetItem(QFileInfo(det.filePath).fileName()));
+            
+            // Create button with parent
+            QPushButton *btn = new QPushButton("Open", latestDetectionsTable);
+            btn->setProperty("detIndex", i);
+            latestDetectionsTable->setCellWidget(i, 5, btn);
+            connect(btn, &QPushButton::clicked, this, &SeizureAnalyzer::onOpenDetectionClicked, Qt::QueuedConnection);
+        }
+    } catch (...) {
+        qWarning() << "Exception in updateLatestDetections()";
     }
 
-    // Re-enable updates after we're done modifying the table
+    // Re-enable
     latestDetectionsTable->setUpdatesEnabled(true);
+    latestDetectionsTable->blockSignals(false);
 }
 
 
@@ -987,149 +1074,276 @@ void SeizureAnalyzer::onSingleFileProcessed(const QString& filePath, bool succes
 void SeizureAnalyzer::scanDetectionFiles()
 {
     if (dataDirectory.isEmpty()) {
+        qDebug() << "scanDetectionFiles: dataDirectory is empty";
         return;
     }
     
     QDir dataDir(dataDirectory);
     if (!dataDir.exists()) {
+        qDebug() << "scanDetectionFiles: dataDirectory does not exist:" << dataDirectory;
         return;
     }
     
-    // Clear existing data before rescanning to avoid duplicates
-    allDetections.clear();
-    dailyCounts.clear();
+    qDebug() << "scanDetectionFiles: Starting scan of" << dataDirectory;
     
-    // Recursively scan for channel detection files (ch*_*.txt) in all subdirectories
-    QDirIterator it(dataDirectory, QStringList() << "ch*_*.txt", QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
-    
-    while (it.hasNext()) {
-        QString filePath = it.next();
-        QFileInfo fileInfo(filePath);
+    try {
+        // Clear existing data before rescanning to avoid duplicates
+        allDetections.clear();
+        dailyCounts.clear();
+        qDebug() << "scanDetectionFiles: Cleared existing data";
         
-        // Skip if file doesn't exist or isn't readable
-        if (!fileInfo.exists() || !fileInfo.isReadable()) {
-            continue;
+        // First, collect all file paths into a list (safer than iterating directly)
+        QStringList filePaths;
+        QDirIterator it(dataDirectory, QStringList() << "ch*_*.txt", QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        
+        qDebug() << "scanDetectionFiles: Collecting file paths...";
+        while (it.hasNext()) {
+            QString filePath = it.next();
+            if (!filePath.isEmpty() && filePath.length() <= 4096) {
+                filePaths.append(filePath);
+            }
         }
         
-        QString fileName = fileInfo.fileName();
+        qDebug() << "scanDetectionFiles: Found" << filePaths.size() << "detection files";
         
-        // Extract channel number from filename: ch0_data_260131_034802.txt -> 0
-        QString baseName = fileInfo.baseName(); // ch0_data_260131_034802
-        int underscorePos = baseName.indexOf('_');
-        if (underscorePos < 2 || !baseName.startsWith("ch")) {
-                continue;
-            }
+        // Now process each file
+        int processedCount = 0;
+        for (const QString& filePath : filePaths) {
+            try {
+                // Validate file path
+                if (filePath.isEmpty() || filePath.length() > 4096) {
+                    qWarning() << "Invalid file path length:" << filePath.length();
+                    continue;
+                }
+                
+                QFileInfo fileInfo(filePath);
+                
+                // Skip if file doesn't exist or isn't readable
+                if (!fileInfo.exists() || !fileInfo.isReadable()) {
+                    continue;
+                }
+                
+                QString fileName = fileInfo.fileName();
+                
+                // Validate filename
+                if (fileName.isEmpty() || fileName.length() > 256) {
+                    qWarning() << "Invalid filename:" << fileName;
+                    continue;
+                }
+                
+                // Extract channel number from filename: ch0_data_260131_034802.txt -> 0
+                QString baseName = fileInfo.baseName(); // ch0_data_260131_034802
+                
+                // Validate baseName
+                if (baseName.isEmpty() || baseName.length() > 256) {
+                    continue;
+                }
+                
+                if (!baseName.startsWith("ch")) {
+                    continue;
+                }
+                
+                int underscorePos = baseName.indexOf('_');
+                if (underscorePos < 2 || underscorePos >= baseName.length()) {
+                    continue;
+                }
 
-        bool ok;
-        int channelIndex = baseName.mid(2, underscorePos - 2).toInt(&ok);
-        if (!ok || channelIndex < 0 || channelIndex >= 32) {
-                continue;
-            }
+                // Safely extract channel index
+                int channelIndex = -1;
+                if (underscorePos > 2) {
+                    QString channelStr = baseName.mid(2, underscorePos - 2);
+                    bool ok = false;
+                    channelIndex = channelStr.toInt(&ok);
+                    if (!ok || channelIndex < 0 || channelIndex >= 32) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
 
-        parseChannelDetectionFile(filePath, channelIndex);
+                parseChannelDetectionFile(filePath, channelIndex);
+                processedCount++;
+                
+                // Log progress every 10 files
+                if (processedCount % 10 == 0) {
+                    qDebug() << "scanDetectionFiles: Processed" << processedCount << "files";
+                }
+            } catch (const std::exception& e) {
+                qWarning() << "Exception processing file" << filePath << ":" << e.what();
+            } catch (...) {
+                qWarning() << "Unknown exception processing file:" << filePath;
+            }
+        }
+        
+        qDebug() << "scanDetectionFiles: Completed. Processed" << processedCount << "files, found" << allDetections.size() << "detections";
+    } catch (const std::exception& e) {
+        qWarning() << "Exception in scanDetectionFiles():" << e.what();
+    } catch (...) {
+        qWarning() << "Unknown exception in scanDetectionFiles()";
     }
 }
 
 void SeizureAnalyzer::parseChannelDetectionFile(const QString& filePath, int channelIndex)
 {
+    qDebug() << "parseChannelDetectionFile: Processing" << filePath << "channel" << channelIndex;
+    
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         qWarning() << "Failed to open detection file:" << filePath;
         return;
     }
     
-    QFileInfo fileInfo(filePath);
-    
-    // Extract RHD file name from the channel filename: ch0_data_260131_034802.txt -> data_260131_034802
-    QString baseName = fileInfo.baseName(); // ch0_data_260131_034802
-    int underscorePos = baseName.indexOf('_');
-    if (underscorePos < 0) {
-        return;
-    }
-    QString rhdFileName = baseName.mid(underscorePos + 1); // data_260131_034802
-    
-    // Try to find the RHD file - check in the same directory, parent directory, and dataDirectory root
-    QString rhdFilePath;
-    QDir currentDir = fileInfo.dir();
-    
-    // Check same directory
-    QString testPath = currentDir.absoluteFilePath(rhdFileName + ".rhd");
-    if (QFile::exists(testPath)) {
-        rhdFilePath = testPath;
-    } else {
-        // Check parent directory
-        testPath = currentDir.absoluteFilePath("../" + rhdFileName + ".rhd");
+    try {
+        QFileInfo fileInfo(filePath);
+        
+        // Extract RHD file name from the channel filename: ch0_data_260131_034802.txt -> data_260131_034802
+        QString baseName = fileInfo.baseName(); // ch0_data_260131_034802
+        
+        // Validate baseName
+        if (baseName.isEmpty() || baseName.length() > 256) {
+            file.close();
+            return;
+        }
+        
+        int underscorePos = baseName.indexOf('_');
+        if (underscorePos < 0 || underscorePos >= baseName.length() - 1) {
+            file.close();
+            return;
+        }
+        
+        QString rhdFileName = baseName.mid(underscorePos + 1); // data_260131_034802
+        
+        // Validate rhdFileName
+        if (rhdFileName.isEmpty() || rhdFileName.length() > 256) {
+            file.close();
+            return;
+        }
+        
+        // Try to find the RHD file - check in the same directory, parent directory, and dataDirectory root
+        QString rhdFilePath;
+        QDir currentDir = fileInfo.dir();
+        
+        // Check same directory
+        QString testPath = currentDir.absoluteFilePath(rhdFileName + ".rhd");
         if (QFile::exists(testPath)) {
             rhdFilePath = testPath;
         } else {
-            // Check dataDirectory root
-            if (!dataDirectory.isEmpty()) {
-                testPath = dataDirectory + "/" + rhdFileName + ".rhd";
-                if (QFile::exists(testPath)) {
-                    rhdFilePath = testPath;
+            // Check parent directory
+            testPath = currentDir.absoluteFilePath("../" + rhdFileName + ".rhd");
+            if (QFile::exists(testPath)) {
+                rhdFilePath = testPath;
+            } else {
+                // Check dataDirectory root
+                if (!dataDirectory.isEmpty()) {
+                    testPath = dataDirectory + "/" + rhdFileName + ".rhd";
+                    if (QFile::exists(testPath)) {
+                        rhdFilePath = testPath;
+                    } else {
+                        // Use file modification time as fallback
+                        rhdFilePath = filePath; // Will use fileInfo.lastModified() below
+                    }
                 } else {
                     // Use file modification time as fallback
                     rhdFilePath = filePath; // Will use fileInfo.lastModified() below
                 }
-            } else {
-                // Use file modification time as fallback
-                rhdFilePath = filePath; // Will use fileInfo.lastModified() below
             }
         }
-    }
 
-    // Get RHD file modification time as base timestamp
-    QFileInfo rhdFileInfo(rhdFilePath);
-    QDateTime rhdBaseTime = rhdFileInfo.exists() ? rhdFileInfo.lastModified() : fileInfo.lastModified();
-    
-    QTextStream in(&file);
-    
-    while (!in.atEnd()) {
-        QString line = in.readLine().trimmed();
-        if (line.isEmpty()) {
-            continue;
+        // Get RHD file modification time as base timestamp
+        QFileInfo rhdFileInfo(rhdFilePath);
+        QDateTime rhdBaseTime = rhdFileInfo.exists() ? rhdFileInfo.lastModified() : fileInfo.lastModified();
+        
+        if (!rhdBaseTime.isValid()) {
+            qWarning() << "Invalid base time for file:" << filePath;
+            file.close();
+            return;
         }
         
-        // Parse line: start, end or start,
-        QStringList parts = line.split(",", Qt::SkipEmptyParts);
-        if (parts.isEmpty()) {
-            continue;
-        }
+        QTextStream in(&file);
         
-        bool ok;
-        qint64 startMs = parts[0].trimmed().toLongLong(&ok);
-        if (!ok) {
-            continue;
-    }
+        int lineNumber = 0;
+        const int MAX_LINES = 1000000; // Safety limit
+        
+        while (!in.atEnd() && lineNumber < MAX_LINES) {
+            lineNumber++;
+            QString line = in.readLine();
+            
+            // Validate line
+            if (line.length() > 1024) {
+                qWarning() << "Line too long in file:" << filePath << "line:" << lineNumber;
+                continue;
+            }
+            
+            line = line.trimmed();
+            if (line.isEmpty()) {
+                continue;
+            }
+            
+            // Parse line: start, end or start,
+            QStringList parts = line.split(",", Qt::SkipEmptyParts);
+            if (parts.isEmpty() || parts.size() > 10) {
+                continue;
+            }
+            
+            // Validate first part
+            if (parts[0].isEmpty() || parts[0].length() > 64) {
+                continue;
+            }
+            
+            bool ok;
+            qint64 startMs = parts[0].trimmed().toLongLong(&ok);
+            if (!ok || startMs < 0 || startMs > 86400000000LL) { // Max ~1000 days in ms
+                continue;
+            }
 
-        // Convert relative timestamp (ms from file start) to absolute QDateTime
-        QDateTime startTime = rhdBaseTime.addMSecs(startMs);
-        
-        SeizureRange range;
-        range.start = startTime;
-        range.channelIndex = channelIndex;
-        // Store the actual RHD file path (or use the detection file path if RHD not found)
-        range.filePath = (rhdFileInfo.exists() && rhdFileInfo.isFile()) ? rhdFilePath : filePath;
-        
-        // Check if there's an END timestamp
-        if (parts.size() >= 2 && !parts[1].trimmed().isEmpty()) {
-            qint64 endMs = parts[1].trimmed().toLongLong(&ok);
-            if (ok) {
-                QDateTime endTime = rhdBaseTime.addMSecs(endMs);
-                range.end = endTime;
-                range.durationSec = startTime.msecsTo(endTime) / 1000.0;
+            // Convert relative timestamp (ms from file start) to absolute QDateTime
+            QDateTime startTime = rhdBaseTime.addMSecs(startMs);
+            
+            if (!startTime.isValid()) {
+                qWarning() << "Invalid start time calculated for file:" << filePath;
+                continue;
+            }
+            
+            SeizureRange range;
+            range.start = startTime;
+            range.channelIndex = channelIndex;
+            // Always store the .txt detection file path (not the RHD file path)
+            // This allows us to find the RHD file later when opening plots
+            // Ensure filePath is valid and not too long
+            if (filePath.length() > 4096) {
+                qWarning() << "File path too long:" << filePath;
+                continue;
+            }
+            range.filePath = filePath; // Always store the .txt file path
+            
+            // Check if there's an END timestamp
+            if (parts.size() >= 2 && !parts[1].trimmed().isEmpty()) {
+                qint64 endMs = parts[1].trimmed().toLongLong(&ok);
+                if (ok) {
+                    QDateTime endTime = rhdBaseTime.addMSecs(endMs);
+                    if (endTime.isValid() && endTime >= startTime) {
+                        range.end = endTime;
+                        range.durationSec = startTime.msecsTo(endTime) / 1000.0;
+                    } else {
+                        // Invalid end time, use start time
+                        range.end = startTime;
+                        range.durationSec = 0.0;
+                    }
+                } else {
+                    // Invalid end timestamp, treat as ongoing seizure
+                    range.end = startTime; // Use start time as placeholder
+                    range.durationSec = 0.0;
+                }
             } else {
-                // Invalid end timestamp, treat as ongoing seizure
+                // No END timestamp - ongoing seizure (recording ended during seizure)
                 range.end = startTime; // Use start time as placeholder
                 range.durationSec = 0.0;
-}
-        } else {
-            // No END timestamp - ongoing seizure (recording ended during seizure)
-            range.end = startTime; // Use start time as placeholder
-            range.durationSec = 0.0;
+            }
+            
+            allDetections.append(range);
         }
-        
-        allDetections.append(range);
+    } catch (...) {
+        qWarning() << "Exception in parseChannelDetectionFile() for:" << filePath;
     }
     
     file.close();
@@ -1294,66 +1508,163 @@ bool loadRhdFile(const QString& rhdPath,
                  qint64& fileStartGlobalMsOut,
     QString& error)
 {
-    // Read RHD file
-    RhdReader::RhdData rhdData;
-    if (!RhdReader::readFile(rhdPath.toStdString(), rhdData)) {
-        error = QString("Failed to read RHD file: %1").arg(rhdPath);
-        return false;
-    }
-
-    if (channelIndex < 0 || channelIndex >= int(rhdData.num_channels)) {
-        error = QString("Channel index %1 out of range (0-%2)").arg(channelIndex).arg(rhdData.num_channels - 1);
-        return false;
-    }
-
-    // Get file modification time as base timestamp
-    QFileInfo fileInfo(rhdPath);
-    QDateTime baseTime = fileInfo.lastModified();
-    qint64 baseTimeMs = baseTime.toMSecsSinceEpoch();
-    fileStartGlobalMsOut = baseTimeMs;
-    
-    // Calculate sample period in milliseconds
-    double samplePeriodMs = 1000.0 / rhdData.sample_rate;
-
-    out.clear();
-    outTsMs.clear();
-    
-    // Extract channel data and convert to microvolts
-    const auto& channelData = rhdData.amplifier_data[channelIndex];
-    
-    // Convert ADC codes to microvolts (Intan ADC: 0.195 μV per LSB, offset at 32768)
-    for (uint32_t i = 0; i < rhdData.num_samples; ++i) {
-        uint16_t adcCode = channelData[i];
-        float uv = float(int(adcCode) - 32768) * 0.195f;
+    try {
+        // Verify file exists and is readable before attempting to read
+        QFileInfo fileCheck(rhdPath);
+        if (!fileCheck.exists()) {
+            error = QString("RHD file does not exist: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
         
-        qint64 sampleGlobalMs = baseTimeMs + qint64(i * samplePeriodMs);
+        if (!fileCheck.isReadable()) {
+            error = QString("RHD file is not readable: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
         
-        out.append(uv);
-        outTsMs.append(sampleGlobalMs);
-    }
-    
-    if (out.isEmpty()) {
-        error = QString("No samples found in file: %1").arg(rhdPath);
+        // Convert path to std::string - simple conversion that worked before
+        std::string filePathStr = rhdPath.toStdString();
+        qDebug() << "loadRhdFile: Attempting to read RHD file:" << rhdPath;
+        
+        // Read RHD file
+        RhdReader::RhdData rhdData;
+        if (!RhdReader::readFile(filePathStr, rhdData)) {
+            error = QString("Failed to read RHD file: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        qDebug() << "loadRhdFile: Read RHD file successfully. Channels:" << rhdData.num_channels << "Samples:" << rhdData.num_samples;
+
+        if (channelIndex < 0 || channelIndex >= int(rhdData.num_channels)) {
+            error = QString("Channel index %1 out of range (0-%2)").arg(channelIndex).arg(rhdData.num_channels - 1);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+
+        // Check if amplifier_data is valid
+        if (rhdData.amplifier_data.empty()) {
+            error = QString("No amplifier data in RHD file: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        if (channelIndex >= int(rhdData.amplifier_data.size())) {
+            error = QString("Channel index %1 exceeds amplifier_data size (%2)").arg(channelIndex).arg(rhdData.amplifier_data.size());
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+
+        // Get file modification time as base timestamp
+        QFileInfo fileInfo(rhdPath);
+        if (!fileInfo.exists()) {
+            error = QString("RHD file does not exist: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        QDateTime baseTime = fileInfo.lastModified();
+        if (!baseTime.isValid()) {
+            error = QString("Invalid file modification time for: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        qint64 baseTimeMs = baseTime.toMSecsSinceEpoch();
+        fileStartGlobalMsOut = baseTimeMs;
+        
+        // Calculate sample period in milliseconds
+        if (rhdData.sample_rate <= 0 || rhdData.sample_rate > 1000000) {
+            error = QString("Invalid sample rate: %1 Hz").arg(rhdData.sample_rate);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        double samplePeriodMs = 1000.0 / rhdData.sample_rate;
+
+        out.clear();
+        outTsMs.clear();
+        
+        // Extract channel data and convert to microvolts
+        const auto& channelData = rhdData.amplifier_data[channelIndex];
+        
+        // Check if channel data is valid
+        if (channelData.empty()) {
+            error = QString("Channel %1 has no data in RHD file: %2").arg(channelIndex).arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        if (channelData.size() != rhdData.num_samples) {
+            qWarning() << "loadRhdFile: Channel data size mismatch. Expected:" << rhdData.num_samples << "Got:" << channelData.size();
+        }
+        
+        // Convert ADC codes to microvolts (Intan ADC: 0.195 μV per LSB, offset at 32768)
+        uint32_t numSamples = std::min(static_cast<uint32_t>(channelData.size()), rhdData.num_samples);
+        qDebug() << "loadRhdFile: Processing" << numSamples << "samples for channel" << channelIndex;
+        
+        for (uint32_t i = 0; i < numSamples; ++i) {
+            if (i >= channelData.size()) {
+                qWarning() << "loadRhdFile: Index" << i << "out of bounds for channel data (size:" << channelData.size() << ")";
+                break;
+            }
+            
+            uint16_t adcCode = channelData[i];
+            float uv = float(int(adcCode) - 32768) * 0.195f;
+            
+            qint64 sampleGlobalMs = baseTimeMs + qint64(i * samplePeriodMs);
+            
+            out.append(uv);
+            outTsMs.append(sampleGlobalMs);
+        }
+        
+        if (out.isEmpty()) {
+            error = QString("No samples found in file: %1").arg(rhdPath);
+            qWarning() << "loadRhdFile:" << error;
+            return false;
+        }
+        
+        qDebug() << "loadRhdFile: Successfully loaded" << out.size() << "samples";
+        return true;
+    } catch (const std::exception& e) {
+        error = QString("Exception loading RHD file: %1").arg(e.what());
+        qCritical() << "loadRhdFile:" << error;
+        return false;
+    } catch (...) {
+        error = QString("Unknown exception loading RHD file: %1").arg(rhdPath);
+        qCritical() << "loadRhdFile:" << error;
         return false;
     }
-    
-    return true;
 }
 
 void SeizureAnalyzer::onOpenDetectionClicked()
 {
     QObject *senderObj = sender();
-    if (!senderObj) return;
+    if (!senderObj) {
+        qWarning() << "onOpenDetectionClicked: No sender object";
+        return;
+    }
     bool ok = false;
     int idx = senderObj->property("detIndex").toInt(&ok);
-    if (!ok || idx < 0 || idx >= visibleDetections.size()) return;
+    if (!ok) {
+        qWarning() << "onOpenDetectionClicked: Failed to get detIndex property";
+        return;
+    }
+    if (idx < 0 || idx >= visibleDetections.size()) {
+        qWarning() << "onOpenDetectionClicked: Index" << idx << "out of range (size:" << visibleDetections.size() << ")";
+        return;
+    }
 
+    qDebug() << "onOpenDetectionClicked: Opening detection at index" << idx;
     const SeizureRange &det = visibleDetections[idx];
     openRawForDetection(det);
 }
 
 void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
 {
+    qDebug() << "openRawForDetection: Starting for channel" << detection.channelIndex << "file:" << detection.filePath;
+    
     // Find the RHD file path from the detection file path
     QString rhdPath = detection.filePath;
     QString rhdFileName;
@@ -1366,29 +1677,85 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
         int underscorePos = baseName.indexOf('_');
         if (underscorePos >= 0) {
             rhdFileName = baseName.mid(underscorePos + 1); // data_260131_034802
+            qDebug() << "openRawForDetection: Extracted RHD filename:" << rhdFileName;
             
-            // Try to find the RHD file
+            // Try to find the RHD file in multiple locations
             QDir currentDir = detFileInfo.dir();
+            
+            // Try parent directory first (most common case)
             QString testPath = currentDir.absoluteFilePath("../" + rhdFileName + ".rhd");
-            if (!QFile::exists(testPath)) {
-                testPath = currentDir.absoluteFilePath(rhdFileName + ".rhd");
+            // Canonicalize to resolve ../ and ./
+            testPath = QFileInfo(testPath).canonicalFilePath();
+            if (testPath.isEmpty()) {
+                testPath = QFileInfo(currentDir.absoluteFilePath("../" + rhdFileName + ".rhd")).absoluteFilePath();
             }
-            if (!QFile::exists(testPath) && !dataDirectory.isEmpty()) {
-                testPath = dataDirectory + "/" + rhdFileName + ".rhd";
-            }
+            qDebug() << "openRawForDetection: Trying parent dir:" << testPath;
             if (QFile::exists(testPath)) {
                 rhdPath = testPath;
+                qDebug() << "openRawForDetection: Found RHD file in parent directory";
+            } else {
+                // Try same directory
+                testPath = currentDir.absoluteFilePath(rhdFileName + ".rhd");
+                // Canonicalize to resolve ../ and ./
+                testPath = QFileInfo(testPath).canonicalFilePath();
+                if (testPath.isEmpty()) {
+                    testPath = QFileInfo(currentDir.absoluteFilePath(rhdFileName + ".rhd")).absoluteFilePath();
+                }
+                qDebug() << "openRawForDetection: Trying same dir:" << testPath;
+                if (QFile::exists(testPath)) {
+                    rhdPath = testPath;
+                    qDebug() << "openRawForDetection: Found RHD file in same directory";
+                } else if (!dataDirectory.isEmpty()) {
+                    // Try data directory root
+                    testPath = dataDirectory + "/" + rhdFileName + ".rhd";
+                    qDebug() << "openRawForDetection: Trying data root:" << testPath;
+                    if (QFile::exists(testPath)) {
+                        rhdPath = testPath;
+                        qDebug() << "openRawForDetection: Found RHD file in data root";
+                    } else {
+                        // Try recursive search in data directory
+                        QDirIterator it(dataDirectory, QStringList() << rhdFileName + ".rhd", 
+                                       QDir::Files, QDirIterator::Subdirectories);
+                        if (it.hasNext()) {
+                            rhdPath = it.next();
+                            qDebug() << "openRawForDetection: Found RHD file via recursive search:" << rhdPath;
+                        }
+                    }
+                }
             }
+        } else {
+            qWarning() << "openRawForDetection: Could not extract RHD filename from:" << baseName;
         }
     } else {
-        // Already an RHD file
+        // Already an RHD file - canonicalize the path to resolve ../ and ./
+        QString canonicalPath = QFileInfo(rhdPath).canonicalFilePath();
+        if (!canonicalPath.isEmpty()) {
+            rhdPath = canonicalPath;
+        } else {
+            // If canonical path fails, try absolute path
+            rhdPath = QFileInfo(rhdPath).absoluteFilePath();
+        }
         rhdFileName = detFileInfo.baseName();
+        qDebug() << "openRawForDetection: Detection file is already RHD file, canonicalized to:" << rhdPath;
+    }
+    
+    // Canonicalize the final path to resolve any ../ or ./
+    QString canonicalPath = QFileInfo(rhdPath).canonicalFilePath();
+    if (!canonicalPath.isEmpty()) {
+        rhdPath = canonicalPath;
+    } else {
+        // If canonical path fails, try absolute path
+        rhdPath = QFileInfo(rhdPath).absoluteFilePath();
     }
     
     if (!QFile::exists(rhdPath)) {
-        QMessageBox::warning(this, "RHD file missing", QString("RHD file not found:\n%1").arg(rhdPath));
+        QString errorMsg = QString("RHD file not found:\n%1\n\nTried locations:\n- Parent directory\n- Same directory\n- Data root: %2").arg(rhdPath).arg(dataDirectory);
+        qWarning() << "openRawForDetection:" << errorMsg;
+        QMessageBox::warning(this, "RHD file missing", errorMsg);
         return;
     }
+    
+    qDebug() << "openRawForDetection: Using RHD file:" << rhdPath;
 
     // Load full file (1 minute of data)
     QVector<float> waveformData;
@@ -1396,14 +1763,45 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
     qint64 fileStartGlobalMs = 0;
     QString error;
 
-    if (!loadRhdFile(rhdPath, detection.channelIndex, waveformData, waveformTsMs,
-                     fileStartGlobalMs, error)) {
+    qDebug() << "openRawForDetection: Loading RHD file...";
+    qDebug() << "openRawForDetection: DEBUG - About to call loadRhdFile";
+    bool loadResult = loadRhdFile(rhdPath, detection.channelIndex, waveformData, waveformTsMs,
+                     fileStartGlobalMs, error);
+    qDebug() << "openRawForDetection: DEBUG - loadRhdFile returned:" << loadResult;
+    if (!loadResult) {
+        qWarning() << "openRawForDetection: Failed to load RHD file:" << error;
         QMessageBox::warning(this, "Error loading waveform", error);
         return;
     }
+    
+    qDebug() << "openRawForDetection: DEBUG - loadRhdFile succeeded, checking data...";
+    qDebug() << "openRawForDetection: DEBUG - waveformData.isEmpty():" << waveformData.isEmpty();
+    qDebug() << "openRawForDetection: DEBUG - waveformTsMs.isEmpty():" << waveformTsMs.isEmpty();
+    
+    // Validate data before using it
+    if (waveformData.isEmpty() || waveformTsMs.isEmpty()) {
+        qWarning() << "openRawForDetection: Empty data after loading RHD file";
+        QMessageBox::warning(this, "Error", "No data loaded from RHD file");
+        return;
+    }
+    
+    qDebug() << "openRawForDetection: DEBUG - waveformData.size():" << waveformData.size();
+    qDebug() << "openRawForDetection: DEBUG - waveformTsMs.size():" << waveformTsMs.size();
+    
+    if (waveformData.size() != waveformTsMs.size()) {
+        qWarning() << "openRawForDetection: Data size mismatch. waveformData:" << waveformData.size() << "waveformTsMs:" << waveformTsMs.size();
+        QMessageBox::warning(this, "Error", "Data size mismatch after loading RHD file");
+        return;
+    }
+    
+    qDebug() << "openRawForDetection: Loaded" << waveformData.size() << "samples";
+    qDebug() << "openRawForDetection: DEBUG - About to find file detections";
 
     // Find all detections from the same RHD file and channel
+    qDebug() << "openRawForDetection: DEBUG - allDetections.size():" << allDetections.size();
+    qDebug() << "openRawForDetection: DEBUG - rhdFileName:" << rhdFileName;
     QList<SeizureRange> fileDetections;
+    qDebug() << "openRawForDetection: DEBUG - Starting loop through allDetections";
     for (const SeizureRange& det : allDetections) {
         // Check if this detection is from the same RHD file
         QFileInfo detFileInfo2(det.filePath);
@@ -1425,13 +1823,29 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
     }
 
     // Calculate window duration from data (1 minute = 60000 ms)
-    int windowMs = waveformTsMs.isEmpty() ? 60000 : 
-                   (waveformTsMs.last() - waveformTsMs.first() + 1);
+    qDebug() << "openRawForDetection: DEBUG - About to calculate windowMs";
+    int windowMs = 60000; // Default to 1 minute
+    if (!waveformTsMs.isEmpty() && waveformTsMs.size() > 1) {
+        qDebug() << "openRawForDetection: DEBUG - Getting first timestamp";
+        qint64 firstTs = waveformTsMs.first();
+        qDebug() << "openRawForDetection: DEBUG - Getting last timestamp";
+        qint64 lastTs = waveformTsMs.last();
+        qDebug() << "openRawForDetection: DEBUG - firstTs:" << firstTs << "lastTs:" << lastTs;
+        if (lastTs >= firstTs) {
+            windowMs = static_cast<int>(lastTs - firstTs + 1);
+            if (windowMs <= 0) windowMs = 60000; // Safety fallback
+        }
+    }
+    qDebug() << "openRawForDetection: DEBUG - windowMs calculated:" << windowMs;
 
     // Convert detection times to sample indices
+    qDebug() << "openRawForDetection: DEBUG - About to convert detection times";
     QList<DetectionRegion> regions;
+    qDebug() << "openRawForDetection: DEBUG - Getting detection start time";
     qint64 detStartMs = detection.start.toMSecsSinceEpoch();
+    qDebug() << "openRawForDetection: DEBUG - Getting detection end time";
     qint64 detEndMs = detection.end.toMSecsSinceEpoch();
+    qDebug() << "openRawForDetection: DEBUG - detStartMs:" << detStartMs << "detEndMs:" << detEndMs;
     
     for (const SeizureRange& det : fileDetections) {
         qint64 detStartMs2 = det.start.toMSecsSinceEpoch();
@@ -1460,11 +1874,27 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
         }
     }
 
+    qDebug() << "openRawForDetection: DEBUG - About to create dialog";
     QString fileName = QFileInfo(rhdPath).fileName();
+    qDebug() << "openRawForDetection: DEBUG - fileName:" << fileName;
     QString title = QString("Channel %1 - %2 (%3 detections)").arg(detection.channelIndex).arg(fileName).arg(regions.size());
+    qDebug() << "openRawForDetection: DEBUG - title:" << title;
 
+    qDebug() << "openRawForDetection: Creating waveform dialog with title:" << title;
+    qDebug() << "openRawForDetection: DEBUG - About to call new WaveformDialog";
+    qDebug() << "openRawForDetection: DEBUG - waveformData.size():" << waveformData.size() << "windowMs:" << windowMs << "fileStartGlobalMs:" << fileStartGlobalMs << "regions.size():" << regions.size();
     WaveformDialog *dlg = new WaveformDialog(waveformData, windowMs, fileStartGlobalMs,
                                              regions, title, this);
+    qDebug() << "openRawForDetection: DEBUG - WaveformDialog created successfully";
     dlg->setAttribute(Qt::WA_DeleteOnClose);
+    qDebug() << "openRawForDetection: DEBUG - Set WA_DeleteOnClose";
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::Window);
+    qDebug() << "openRawForDetection: DEBUG - Set window flags";
     dlg->show();
+    qDebug() << "openRawForDetection: DEBUG - Called show()";
+    dlg->raise();
+    qDebug() << "openRawForDetection: DEBUG - Called raise()";
+    dlg->activateWindow();
+    qDebug() << "openRawForDetection: DEBUG - Called activateWindow()";
+    qDebug() << "openRawForDetection: Waveform dialog shown";
 }

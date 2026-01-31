@@ -110,6 +110,9 @@ private:
     QDate selectedDate;
     QList<SeizureRange> visibleDetections;
     
+    // Simple flag to prevent re-entrant calls
+    bool isUpdating;
+    
     // Data processing
     QFileSystemWatcher *dataWatcher;
     QStringList processedRhdFiles; // Track which files we've already processed

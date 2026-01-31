@@ -1,0 +1,17 @@
+debug/main.o
+debug/seizure_analyzer.o
+debug/fpga_device_dialog.o
+debug/file_processor_worker.o
+debug/hdf5_reader.o
+debug/fpga_logger.o
+debug/halo_response_decoder.o
+debug/hdf5_writer.o
+debug/seizure_detector.o
+debug/seizure_processor.o
+debug/rhd_reader.o
+debug/ok_frontpanel.o
+debug/fpga_processor.o
+debug/qrc_resources.o
+debug/moc_seizure_analyzer.o
+debug/moc_fpga_device_dialog.o
+debug/moc_file_processor_worker.o
