@@ -35,6 +35,7 @@
 #include <QPainterPath>
 #include <QDialog>
 #include <QFontMetrics>
+#include <QMutexLocker>
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -390,9 +391,11 @@ void SeizureAnalyzer::setupUI()
 
 void SeizureAnalyzer::reloadData()
 {
+    QMutexLocker locker(&processingMutex);
     // Clear existing detections
     allDetections.clear();
     dailyCounts.clear();
+    locker.unlock();
     
     // Scan for detection files in the data directory
     if (!dataDirectory.isEmpty()) {
@@ -455,16 +458,19 @@ void SeizureAnalyzer::updateSeizureCounts()
     }
     
     try {
+        QMutexLocker locker(&processingMutex);
         qDebug() << "updateSeizureCounts: Processing" << allDetections.size() << "detections";
         
         QList<SeizureRange> channelDetections;
         channelDetections.reserve(allDetections.size()); // Pre-allocate to avoid reallocations
         
+        // Copy data while holding lock
         for (const SeizureRange &detection : allDetections) {
             if (!channelSelected(detection.channelIndex)) continue;
             if (!detection.start.isValid()) continue; // Skip invalid dates
             channelDetections.append(detection);
         }
+        locker.unlock(); // Release lock before UI updates
         
         qDebug() << "updateSeizureCounts: Filtered to" << channelDetections.size() << "channel detections";
         
@@ -515,20 +521,26 @@ void SeizureAnalyzer::updateDailyCounts()
     dailyCountsTable->blockSignals(true);
     dailyCountsTable->setUpdatesEnabled(false);
     
-    // Clear old data map
-    dailyCounts.clear();
+    QMutexLocker locker(&processingMutex);
+    // Copy data while holding lock
+    QList<SeizureRange> detectionsCopy = allDetections;
+    locker.unlock(); // Release lock before processing
     
-    // Count detections by date for selected channels only
-    for (const SeizureRange &detection : allDetections) {
+    // Count detections by date for selected channels only - use local map
+    QMap<QDate, int> localDailyCounts;
+    for (const SeizureRange &detection : detectionsCopy) {
         if (!channelSelected(detection.channelIndex)) continue;
         if (!detection.start.isValid()) continue;
         
         QDate date = detection.start.date();
         if (date.isValid()) {
-            dailyCounts[date]++;
+            localDailyCounts[date]++;
         }
     }
     
+    // Re-acquire lock to update dailyCounts
+    locker.relock();
+    dailyCounts = localDailyCounts; // Update shared data while holding lock
     // Get sorted dates (newest first)
     QList<QDate> dates = dailyCounts.keys();
     std::sort(dates.begin(), dates.end(), std::greater<QDate>());
@@ -583,17 +595,44 @@ void SeizureAnalyzer::onChannelItemChanged(QListWidgetItem *item)
 
 void SeizureAnalyzer::onDailySelectionChanged()
 {
+    if (!dailyCountsTable) {
+        selectedDate = QDate();
+        updateLatestDetections();
+        return;
+    }
+    
     auto sel = dailyCountsTable->selectionModel()->selectedRows();
     if (sel.isEmpty()) {
         selectedDate = QDate();
     } else {
         QModelIndex idx = sel.first();
-        QTableWidgetItem *item = dailyCountsTable->item(idx.row(), 0);
-        if (item) {
-            QString dateStr = item->text();
-            selectedDate = QDate::fromString(dateStr, "yyyy-MM-dd");
-        } else {
+        
+        // Validate index is valid and row is within bounds
+        // QModelIndex can become invalid if table is updated (setRowCount, clear, etc.)
+        if (!idx.isValid()) {
             selectedDate = QDate();
+        } else {
+            int row = idx.row();
+            int rowCount = dailyCountsTable->rowCount();
+            
+            // Validate row is within bounds before accessing
+            if (row >= 0 && row < rowCount) {
+                QTableWidgetItem *item = dailyCountsTable->item(row, 0);
+                if (item) {
+                    QString dateStr = item->text();
+                    QDate parsedDate = QDate::fromString(dateStr, "yyyy-MM-dd");
+                    if (parsedDate.isValid()) {
+                        selectedDate = parsedDate;
+                    } else {
+                        selectedDate = QDate();
+                    }
+                } else {
+                    selectedDate = QDate();
+                }
+            } else {
+                // Row out of bounds - table was likely updated
+                selectedDate = QDate();
+            }
         }
     }
     updateLatestDetections();
@@ -620,11 +659,15 @@ void SeizureAnalyzer::updateLatestDetections()
 
         // Collect matching detections - SIMPLE loop
         QList<SeizureRange> channelDetections;
-        for (const SeizureRange &detection : allDetections) {
-            if (!channelSelected(detection.channelIndex)) continue;
-            if (detection.start.date() != selectedDate) continue;
-            channelDetections.append(detection);
-        }
+        {
+            QMutexLocker locker(&processingMutex);
+            // Copy data while holding lock
+            for (const SeizureRange &detection : allDetections) {
+                if (!channelSelected(detection.channelIndex)) continue;
+                if (detection.start.date() != selectedDate) continue;
+                channelDetections.append(detection);
+            }
+        } // Release lock before sorting/processing
         
         // Sort by end time (newest first)
         std::sort(channelDetections.begin(), channelDetections.end(), 
@@ -642,14 +685,16 @@ void SeizureAnalyzer::updateLatestDetections()
         visibleDetections = channelDetections;
         int count = channelDetections.size();
         
-        // Clear old widgets first
+        // Clear old widgets first - disconnect and delete immediately to prevent crashes
+        // Using deleteLater() can cause Qt to access widgets during setRowCount() layout updates
         int oldCount = latestDetectionsTable->rowCount();
         for (int i = 0; i < oldCount; ++i) {
-
             QWidget *w = latestDetectionsTable->cellWidget(i, 5);
             if (w) {
+                // Disconnect all signals first to prevent signal delivery to deleted object
+                QObject::disconnect(w, nullptr, nullptr, nullptr);
                 latestDetectionsTable->removeCellWidget(i, 5);
-                w->deleteLater(); // Safer than delete
+                delete w; // Delete immediately - safe because we disconnected signals
             }
         }
         
@@ -672,7 +717,9 @@ void SeizureAnalyzer::updateLatestDetections()
             QPushButton *btn = new QPushButton("Open", latestDetectionsTable);
             btn->setProperty("detIndex", i);
             latestDetectionsTable->setCellWidget(i, 5, btn);
-            connect(btn, &QPushButton::clicked, this, &SeizureAnalyzer::onOpenDetectionClicked, Qt::QueuedConnection);
+            // Use default DirectConnection for button clicks (same thread)
+            // QueuedConnection can cause timing issues where button is deleted before signal is processed
+            connect(btn, &QPushButton::clicked, this, &SeizureAnalyzer::onOpenDetectionClicked);
         }
     } catch (...) {
         qWarning() << "Exception in updateLatestDetections()";
@@ -721,9 +768,12 @@ void SeizureAnalyzer::selectDataFolder()
         }
         
         // Clear all data when changing folder
-        allDetections.clear();
-        dailyCounts.clear();
-        processedRhdFiles.clear();
+        {
+            QMutexLocker locker(&processingMutex);
+            allDetections.clear();
+            dailyCounts.clear();
+            processedRhdFiles.clear();
+        }
         visibleDetections.clear();
         selectedDate = QDate();
         
@@ -810,6 +860,7 @@ void SeizureAnalyzer::stopContinuousProcessing()
         processingTimer->stop();
     }
     // Reset processing flag to allow restart
+    QMutexLocker locker(&processingMutex);
     isProcessing = false;
 }
 
@@ -833,9 +884,8 @@ void SeizureAnalyzer::onStartClicked()
 void SeizureAnalyzer::onStopClicked()
 {
     if (processingTimer && processingTimer->isActive()) {
-        // Stop processing
+        // Stop processing (this already sets isProcessing = false with mutex protection)
         stopContinuousProcessing();
-        isProcessing = false; // Reset processing flag to allow restart
         startButton->setEnabled(true);  // Enable start button
         stopButton->setEnabled(false);   // Disable stop button
         qDebug() << "Processing stopped";
@@ -888,7 +938,11 @@ void SeizureAnalyzer::processNewRhdFiles()
     }
     
     int totalFiles = rhdFiles.size();
-    int processedCount = processedRhdFiles.size();
+    int processedCount;
+    {
+        QMutexLocker locker(&processingMutex);
+        processedCount = processedRhdFiles.size();
+    }
     
     // Only files that have a newer file after them are processable
     int processableFiles = totalFiles >= 2 ? totalFiles - 1 : 0;
@@ -912,6 +966,7 @@ void SeizureAnalyzer::processNewRhdFiles()
         const QFileInfo& fileInfo = rhdFiles[i];
         QString filePath = fileInfo.absoluteFilePath();
     
+        QMutexLocker locker(&processingMutex);
         // Skip if already processed
         if (processedRhdFiles.contains(filePath)) {
             continue;
@@ -940,6 +995,7 @@ void SeizureAnalyzer::processNewRhdFiles()
         // Queue file for background processing (non-blocking)
         qDebug() << "Queueing RHD file for processing:" << filePath;
         isProcessing = true;
+        locker.unlock(); // Release lock before invoking method
         updateProcessingStatus(true);
     
         // Process file in background thread (non-blocking)
@@ -968,11 +1024,16 @@ void SeizureAnalyzer::onFileProcessed(const QString& filePath, bool success, con
     }
     
     // Otherwise, this is continuous processing
-    isProcessing = false;
+    {
+        QMutexLocker locker(&processingMutex);
+        isProcessing = false;
+        if (success) {
+            processedRhdFiles.append(filePath);
+        }
+    }
     updateProcessingStatus(false);
     
     if (success) {
-        processedRhdFiles.append(filePath);
         qDebug() << "Successfully processed:" << filePath;
         
         // Rescan detection files to pick up new results
@@ -994,7 +1055,11 @@ void SeizureAnalyzer::onFileProcessed(const QString& filePath, bool success, con
                 it.next();
                 totalFiles++;
     }
-            int processedCount = processedRhdFiles.size();
+            int processedCount;
+            {
+                QMutexLocker locker(&processingMutex);
+                processedCount = processedRhdFiles.size();
+            }
             int processableFiles = totalFiles > 1 ? totalFiles - 1 : totalFiles;
             updateProcessingStatusLabel(processedCount, processableFiles, totalFiles);
         }
@@ -1087,9 +1152,11 @@ void SeizureAnalyzer::scanDetectionFiles()
     qDebug() << "scanDetectionFiles: Starting scan of" << dataDirectory;
     
     try {
+        QMutexLocker locker(&processingMutex);
         // Clear existing data before rescanning to avoid duplicates
         allDetections.clear();
         dailyCounts.clear();
+        locker.unlock();
         qDebug() << "scanDetectionFiles: Cleared existing data";
         
         // First, collect all file paths into a list (safer than iterating directly)
@@ -1175,7 +1242,10 @@ void SeizureAnalyzer::scanDetectionFiles()
             }
         }
         
-        qDebug() << "scanDetectionFiles: Completed. Processed" << processedCount << "files, found" << allDetections.size() << "detections";
+        {
+            QMutexLocker locker(&processingMutex);
+            qDebug() << "scanDetectionFiles: Completed. Processed" << processedCount << "files, found" << allDetections.size() << "detections";
+        }
     } catch (const std::exception& e) {
         qWarning() << "Exception in scanDetectionFiles():" << e.what();
     } catch (...) {
@@ -1340,7 +1410,11 @@ void SeizureAnalyzer::parseChannelDetectionFile(const QString& filePath, int cha
                 range.durationSec = 0.0;
             }
             
-            allDetections.append(range);
+            // Append to shared data structure with mutex protection
+            {
+                QMutexLocker locker(&processingMutex);
+                allDetections.append(range);
+            }
         }
     } catch (...) {
         qWarning() << "Exception in parseChannelDetectionFile() for:" << filePath;
@@ -1645,19 +1719,36 @@ void SeizureAnalyzer::onOpenDetectionClicked()
         qWarning() << "onOpenDetectionClicked: No sender object";
         return;
     }
-    bool ok = false;
-    int idx = senderObj->property("detIndex").toInt(&ok);
-    if (!ok) {
-        qWarning() << "onOpenDetectionClicked: Failed to get detIndex property";
+    
+    // Get the button's row in the table to ensure we're using current data
+    // This is safer than storing an index that could become stale
+    QWidget *btnWidget = qobject_cast<QWidget*>(senderObj);
+    if (!btnWidget) {
+        qWarning() << "onOpenDetectionClicked: Sender is not a widget";
         return;
     }
-    if (idx < 0 || idx >= visibleDetections.size()) {
-        qWarning() << "onOpenDetectionClicked: Index" << idx << "out of range (size:" << visibleDetections.size() << ")";
+    
+    // Find which row this button is in
+    int row = -1;
+    for (int i = 0; i < latestDetectionsTable->rowCount(); ++i) {
+        QWidget *cellWidget = latestDetectionsTable->cellWidget(i, 5);
+        if (cellWidget == btnWidget) {
+            row = i;
+            break;
+        }
+    }
+    
+    // Validate row and get detection data
+    if (row < 0 || row >= visibleDetections.size()) {
+        qWarning() << "onOpenDetectionClicked: Row" << row << "out of range (size:" << visibleDetections.size() << ")";
         return;
     }
-
-    qDebug() << "onOpenDetectionClicked: Opening detection at index" << idx;
-    const SeizureRange &det = visibleDetections[idx];
+    
+    // Get detection data immediately while we know the index is valid
+    // Make a copy to avoid issues if visibleDetections is updated
+    SeizureRange det = visibleDetections[row];
+    
+    qDebug() << "onOpenDetectionClicked: Opening detection at row" << row;
     openRawForDetection(det);
 }
 
@@ -1798,11 +1889,18 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
     qDebug() << "openRawForDetection: DEBUG - About to find file detections";
 
     // Find all detections from the same RHD file and channel
-    qDebug() << "openRawForDetection: DEBUG - allDetections.size():" << allDetections.size();
+    // Copy allDetections while holding lock to avoid race conditions
+    QList<SeizureRange> allDetectionsCopy;
+    {
+        QMutexLocker locker(&processingMutex);
+        allDetectionsCopy = allDetections;
+    }
+    
+    qDebug() << "openRawForDetection: DEBUG - allDetections.size():" << allDetectionsCopy.size();
     qDebug() << "openRawForDetection: DEBUG - rhdFileName:" << rhdFileName;
     QList<SeizureRange> fileDetections;
     qDebug() << "openRawForDetection: DEBUG - Starting loop through allDetections";
-    for (const SeizureRange& det : allDetections) {
+    for (const SeizureRange& det : allDetectionsCopy) {
         // Check if this detection is from the same RHD file
         QFileInfo detFileInfo2(det.filePath);
         QString detRhdFileName;
