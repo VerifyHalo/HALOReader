@@ -24,6 +24,8 @@
 #include <QDir>
 #include <QThread>
 #include <QMutex>
+#include <memory>
+#include "../core/fpga_processor.h"
 
 QT_BEGIN_NAMESPACE
 class QAction;
@@ -43,7 +45,7 @@ class SeizureAnalyzer : public QMainWindow
     Q_OBJECT
 
 public:
-    SeizureAnalyzer(QWidget *parent = nullptr);
+    explicit SeizureAnalyzer(std::unique_ptr<FpgaProcessor> fpgaProcessor, QWidget *parent = nullptr);
     ~SeizureAnalyzer();
 
 protected:
@@ -83,6 +85,7 @@ private:
     QLineEdit *dataFolderPathEdit;
     QPushButton *startButton;
     QPushButton *stopButton;
+    QPushButton *cleanOutputsButton;
     QLabel *processingStatusLabel;
     QLineEdit *singleFilePathEdit;
     QPushButton *singleFileBrowseButton;
@@ -123,6 +126,9 @@ private:
     bool isProcessing; // Track if currently processing a file
     QString currentSingleFilePath; // Track which file is being processed in single file mode
     
+    // Owned FPGA processor — kept alive for the application lifetime
+    std::unique_ptr<FpgaProcessor> fpgaProcessor_;
+
     bool channelSelected(int channelIndex) const;
     void updateProcessingStatus(bool processing);
     void updateProcessingStatusLabel(int processedCount, int processableFiles, int totalFiles);
@@ -130,6 +136,7 @@ private:
     void stopContinuousProcessing();
     void onStartClicked(); // Handle start button click
     void onStopClicked();  // Handle stop button click
+    void onCleanOutputsClicked(); // Delete all FPGA detection output files
     void onSingleFileBrowseClicked(); // Handle single file browse button click
     void onSingleFileProcessClicked(); // Handle single file process button click
     void onSingleFileProcessed(const QString& filePath, bool success, const QString& error); // Handle single file processing completion

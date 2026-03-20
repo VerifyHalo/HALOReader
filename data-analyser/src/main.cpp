@@ -168,9 +168,12 @@ int main(int argc, char *argv[])
                              "The application will exit.");
         return 1;
     }
-    
+
+    // Take ownership of the already-open FpgaProcessor — never close and reopen
+    auto fpgaProc = deviceDialog.takeFpgaProcessor();
+
     // Now show the main window
-    SeizureAnalyzer window;
+    SeizureAnalyzer window(std::move(fpgaProc));
     window.show();
     
     int result = app.exec();

@@ -26,13 +26,9 @@ public:
                    uint32_t window_timeout = 200,
                    uint32_t transition_count = 30);
     
-    // Process a single sample
-    // Returns true if an event was generated (check getEvents())
-    bool processSample(uint16_t adc_code, uint32_t channel_id, uint64_t sample_index);
-    
     // Get all events generated since last call (clears internal buffer)
     std::vector<SeizureEvent> getEvents();
-    
+
     // Reset detector state (useful when starting new file)
     void reset();
     
@@ -46,24 +42,7 @@ public:
     uint32_t getTransitionCount() const { return transition_count_; }
 
 private:
-    // NEO computation: ψ[n] = x[n]² - x[n-1] × x[n+1]
-    int64_t computeNEO(uint16_t x_prev, uint16_t x_curr, uint16_t x_next);
-    
-    // Per-channel state
-    struct ChannelState {
-        enum State {
-            NORMAL = 0,
-            SEIZURE = 1
-        };
-        
-        State state;
-        std::vector<uint16_t> sample_history;  // Need 3 samples for NEO
-        uint32_t detection_counter;             // Consecutive detections
-        uint32_t timeout_counter;               // Samples without detection
-        uint64_t seizure_start_sample;          // Sample index when seizure started
-    };
-    
-    std::map<uint32_t, ChannelState> channel_states_;
+    std::map<uint32_t, int> channel_states_; // unused, kept for potential future use
     
     // Configuration parameters
     uint32_t threshold_;

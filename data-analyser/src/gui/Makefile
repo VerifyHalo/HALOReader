@@ -1606,6 +1606,9 @@ moc_seizure_analyzer.cpp: seizure_analyzer.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/qthread.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QMutex \
 		/opt/homebrew/lib/QtCore.framework/Headers/qmutex.h \
+		../core/fpga_processor.h \
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
 		moc_predefs.h \
 		/opt/homebrew/share/qt/libexec/moc
 	/opt/homebrew/share/qt/libexec/moc $(DEFINES) --include /Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui/moc_predefs.h -I/opt/homebrew/share/qt/mkspecs/macx-clang -I/Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui -I/opt/homebrew/include -I/opt/homebrew/lib/QtWidgets.framework/Headers -I/opt/homebrew/lib/QtGui.framework/Headers -I/opt/homebrew/lib/QtCore.framework/Headers -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 -I/Library/Developer/CommandLineTools/usr/lib/clang/17/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include -I/Library/Developer/CommandLineTools/usr/include -F/opt/homebrew/lib seizure_analyzer.h -o moc_seizure_analyzer.cpp
@@ -1847,6 +1850,9 @@ moc_fpga_device_dialog.cpp: fpga_device_dialog.h \
 		/opt/homebrew/include/QtWidgets/qdialogbuttonbox.h \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QProgressBar \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qprogressbar.h \
+		../core/fpga_processor.h \
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
 		moc_predefs.h \
 		/opt/homebrew/share/qt/libexec/moc
 	/opt/homebrew/share/qt/libexec/moc $(DEFINES) --include /Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui/moc_predefs.h -I/opt/homebrew/share/qt/mkspecs/macx-clang -I/Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui -I/opt/homebrew/include -I/opt/homebrew/lib/QtWidgets.framework/Headers -I/opt/homebrew/lib/QtGui.framework/Headers -I/opt/homebrew/lib/QtCore.framework/Headers -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 -I/Library/Developer/CommandLineTools/usr/lib/clang/17/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include -I/Library/Developer/CommandLineTools/usr/include -F/opt/homebrew/lib fpga_device_dialog.h -o moc_fpga_device_dialog.cpp
@@ -1971,6 +1977,11 @@ moc_file_processor_worker.cpp: file_processor_worker.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QWaitCondition \
 		/opt/homebrew/lib/QtCore.framework/Headers/qwaitcondition.h \
 		/opt/homebrew/include/QtCore/QDeadlineTimer \
+		../core/fpga_processor.h \
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
+		../core/seizure_processor.h \
+		../core/rhd_reader.h \
 		moc_predefs.h \
 		/opt/homebrew/share/qt/libexec/moc
 	/opt/homebrew/share/qt/libexec/moc $(DEFINES) --include /Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui/moc_predefs.h -I/opt/homebrew/share/qt/mkspecs/macx-clang -I/Users/antonmelnychuk/workspace/pipeline/data-analyser/src/gui -I/opt/homebrew/include -I/opt/homebrew/lib/QtWidgets.framework/Headers -I/opt/homebrew/lib/QtGui.framework/Headers -I/opt/homebrew/lib/QtCore.framework/Headers -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1 -I/Library/Developer/CommandLineTools/usr/lib/clang/17/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include -I/Library/Developer/CommandLineTools/usr/include -F/opt/homebrew/lib file_processor_worker.h -o moc_file_processor_worker.cpp
@@ -2285,6 +2296,9 @@ main.o: ../main.cpp /opt/homebrew/lib/QtWidgets.framework/Headers/QApplication \
 		/opt/homebrew/lib/QtCore.framework/Headers/qthread.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QMutex \
 		/opt/homebrew/lib/QtCore.framework/Headers/qmutex.h \
+		../core/fpga_processor.h \
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
 		fpga_device_dialog.h \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QDialog \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qdialog.h \
@@ -2569,6 +2583,9 @@ seizure_analyzer.o: seizure_analyzer.cpp /opt/homebrew/lib/QtGui.framework/Heade
 		/opt/homebrew/lib/QtCore.framework/Headers/qthread.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QMutex \
 		/opt/homebrew/lib/QtCore.framework/Headers/qmutex.h \
+		../core/fpga_processor.h \
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QApplication \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qapplication.h \
 		/opt/homebrew/lib/QtGui.framework/Headers/QIcon \
@@ -2601,10 +2618,7 @@ seizure_analyzer.o: seizure_analyzer.cpp /opt/homebrew/lib/QtGui.framework/Heade
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QGroupBox \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qgroupbox.h \
 		../core/seizure_processor.h \
-		../core/seizure_detector.h \
 		../core/rhd_reader.h \
-		../core/fpga_processor.h \
-		../core/ok_frontpanel.h \
 		file_processor_worker.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QObject \
 		/opt/homebrew/lib/QtCore.framework/Headers/qobject.h \
@@ -2863,7 +2877,9 @@ fpga_device_dialog.o: fpga_device_dialog.cpp fpga_device_dialog.h \
 		/opt/homebrew/include/QtWidgets/qdialogbuttonbox.h \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QProgressBar \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qprogressbar.h \
+		../core/fpga_processor.h \
 		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/QApplication \
 		/opt/homebrew/lib/QtWidgets.framework/Headers/qapplication.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QFileInfo \
@@ -2999,11 +3015,11 @@ file_processor_worker.o: file_processor_worker.cpp file_processor_worker.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QWaitCondition \
 		/opt/homebrew/lib/QtCore.framework/Headers/qwaitcondition.h \
 		/opt/homebrew/include/QtCore/QDeadlineTimer \
-		../core/seizure_processor.h \
-		../core/seizure_detector.h \
-		../core/rhd_reader.h \
 		../core/fpga_processor.h \
 		../core/ok_frontpanel.h \
+		../core/seizure_detector.h \
+		../core/seizure_processor.h \
+		../core/rhd_reader.h \
 		/opt/homebrew/lib/QtCore.framework/Headers/QMutexLocker
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o file_processor_worker.o file_processor_worker.cpp
 
@@ -3190,10 +3206,10 @@ seizure_detector.o: ../core/seizure_detector.cpp ../core/seizure_detector.h
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o seizure_detector.o ../core/seizure_detector.cpp
 
 seizure_processor.o: ../core/seizure_processor.cpp ../core/seizure_processor.h \
-		../core/seizure_detector.h \
 		../core/rhd_reader.h \
 		../core/fpga_processor.h \
-		../core/ok_frontpanel.h
+		../core/ok_frontpanel.h \
+		../core/seizure_detector.h
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o seizure_processor.o ../core/seizure_processor.cpp
 
 rhd_reader.o: ../core/rhd_reader.cpp ../core/rhd_reader.h

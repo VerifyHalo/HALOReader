@@ -21,9 +21,9 @@ ifeq ($(DETECTED_OS),Windows)
     RMDIR = rmdir /S /Q
     SEP = \\
 else
-    TARGET = $(BUILD_DIR)/seizure_analyzer.app/Contents/MacOS/seizure_analyzer
+    TARGET = $(BUILD_DIR)/HALOReader.app/Contents/MacOS/HALOReader
     MKDIR = mkdir -p
-    COPY = cp
+    COPY = cp -rf
     RM = rm -f
     RMDIR = rm -rf
     SEP = /
@@ -40,9 +40,9 @@ $(TARGET):
 	$(if $(wildcard $(GUI_DIR)/HALOReader.exe),$(COPY) $(GUI_DIR)/HALOReader.exe $(TARGET),$(if $(wildcard $(GUI_DIR)/debug/HALOReader.exe),$(COPY) $(GUI_DIR)/debug/HALOReader.exe $(TARGET),$(if $(wildcard $(GUI_DIR)/release/HALOReader.exe),$(COPY) $(GUI_DIR)/release/HALOReader.exe $(TARGET),@echo Executable not found)))
 else
 $(TARGET):
-	cd $(GUI_DIR) && make clean 2>/dev/null || true && qmake && make
-	$(MKDIR) $(BUILD_DIR)/seizure_analyzer.app/Contents/MacOS
-	$(COPY) $(GUI_DIR)/seizure_analyzer.app/Contents/MacOS/seizure_analyzer $(TARGET)
+	cd $(GUI_DIR) && make clean 2>/dev/null || true && qmake && make -j4
+	$(MKDIR) $(BUILD_DIR)
+	$(COPY) $(GUI_DIR)/HALOReader.app $(BUILD_DIR)/HALOReader.app
 endif
 
 # Clean build artifacts
@@ -54,9 +54,8 @@ ifeq ($(DETECTED_OS),Windows)
 	$(if $(wildcard $(BUILD_DIR)/seizure_analyzer.exe),$(RM) $(BUILD_DIR)/seizure_analyzer.exe)
 else
 	cd $(GUI_DIR) && make clean 2>/dev/null || true
-	$(RMDIR) $(BUILD_DIR)/obj 2>/dev/null || true
+	$(RMDIR) $(BUILD_DIR)/HALOReader.app 2>/dev/null || true
 	$(RMDIR) $(BUILD_DIR)/seizure_analyzer.app 2>/dev/null || true
-	$(RM) $(BUILD_DIR)/*.o 2>/dev/null || true
 endif
 
 # Clean everything including logs
@@ -83,7 +82,7 @@ run: $(TARGET)
 ifeq ($(DETECTED_OS),Windows)
 	$(TARGET)
 else
-	$(TARGET)
+	open $(BUILD_DIR)/HALOReader.app
 endif
 
 # Debug build
@@ -93,9 +92,9 @@ ifeq ($(DETECTED_OS),Windows)
 	$(MKDIR) $(BUILD_DIR)
 	$(if $(wildcard $(GUI_DIR)/debug/seizure_analyzer.exe),$(COPY) $(GUI_DIR)/debug/seizure_analyzer.exe $(TARGET),$(if $(wildcard $(GUI_DIR)/seizure_analyzer.exe),$(COPY) $(GUI_DIR)/seizure_analyzer.exe $(TARGET),@echo Executable not found)))
 else
-	cd $(GUI_DIR) && qmake CONFIG+=debug && make
-	$(MKDIR) $(BUILD_DIR)/seizure_analyzer.app/Contents/MacOS
-	$(COPY) $(GUI_DIR)/seizure_analyzer.app/Contents/MacOS/seizure_analyzer $(TARGET)
+	cd $(GUI_DIR) && qmake CONFIG+=debug && make -j4
+	$(MKDIR) $(BUILD_DIR)
+	$(COPY) $(GUI_DIR)/HALOReader.app $(BUILD_DIR)/HALOReader.app
 endif
 
 # Help

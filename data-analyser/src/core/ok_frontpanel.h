@@ -54,6 +54,7 @@ public:
     // Pipe operations
     int writeToPipeIn(uint32_t ep, const std::vector<uint8_t>& data);
     std::vector<uint8_t> readFromPipeOut(uint32_t ep, size_t length);
+    std::vector<uint8_t> readFromBlockPipeOut(uint32_t ep, size_t block_size, size_t length);
     
     // Error handling
     int getLastError();

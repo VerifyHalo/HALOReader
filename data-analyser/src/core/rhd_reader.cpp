@@ -264,12 +264,13 @@ namespace {
             // Read timestamps (skip them)
             file.seekg(header.num_samples_per_block * 4, std::ios::cur);
             
-            // Read amplifier data for this block
-            for (uint32_t sample = 0; sample < header.num_samples_per_block; ++sample) {
-                for (uint32_t ch = 0; ch < header.num_amplifier_channels; ++ch) {
+            // Read amplifier data for this block.
+            // Per Intan docs (MATLAB reference: fread(fid,[num_samples,num_channels],'uint16')' column-major):
+            // data is stored channel-first within each block — all samples for ch0, then all for ch1, etc.
+            for (uint32_t ch = 0; ch < header.num_amplifier_channels; ++ch) {
+                for (uint32_t sample = 0; sample < header.num_samples_per_block; ++sample) {
                     uint16_t value = read_le<uint16_t>(file);
-                    uint32_t sample_idx = block * header.num_samples_per_block + sample;
-                    amplifier_data[ch][sample_idx] = value;
+                    amplifier_data[ch][block * header.num_samples_per_block + sample] = value;
                 }
             }
             
@@ -338,20 +339,17 @@ bool RhdReader::readFile(const std::string& filepath, RhdData& data) {
 std::vector<uint16_t> RhdReader::extractDataChannels(const RhdData& rhd_data) {
     std::vector<uint16_t> result;
     
-    // Skip channels 0-1 (reference/ground), use channels 2-31
-    uint32_t num_data_channels = std::min(static_cast<uint32_t>(30), 
-                                         rhd_data.num_channels > 2 ? rhd_data.num_channels - 2 : 0);
+    // Use all amplifier channels
+    uint32_t num_data_channels = rhd_data.num_channels;
     if (num_data_channels == 0 || rhd_data.num_samples == 0) {
         return result;
     }
-    
+
     result.reserve(num_data_channels * rhd_data.num_samples);
-    
-    // Extract channels 2-31 (map to FPGA channels 0-29)
-    for (uint32_t fpga_ch = 0; fpga_ch < num_data_channels; ++fpga_ch) {
-        uint32_t rhd_ch = fpga_ch + 2;  // FPGA channel 0 = RHD channel 2
-        if (rhd_ch < rhd_data.amplifier_data.size()) {
-            const auto& channel_data = rhd_data.amplifier_data[rhd_ch];
+
+    for (uint32_t ch = 0; ch < num_data_channels; ++ch) {
+        if (ch < rhd_data.amplifier_data.size()) {
+            const auto& channel_data = rhd_data.amplifier_data[ch];
             result.insert(result.end(), channel_data.begin(), channel_data.end());
         }
     }

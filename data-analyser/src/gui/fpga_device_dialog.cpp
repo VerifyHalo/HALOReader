@@ -13,7 +13,6 @@ FpgaDeviceDialog::FpgaDeviceDialog(QWidget *parent)
     , selectButton(nullptr)
     , statusLabel(nullptr)
     , progressBar(nullptr)
-    , fpga_configured_(false)
 {
     setWindowTitle("Select FPGA Device");
     setMinimumSize(500, 300);
@@ -145,12 +144,12 @@ void FpgaDeviceDialog::onSelectClicked()
     refreshButton->setEnabled(false);
     QApplication::processEvents();
     
-    // Configure FPGA
-    fpga_configured_ = configureFpga(selected_serial_);
-    
+    // Configure FPGA — keep processor alive
+    fpga_processor_ = configureFpga(selected_serial_);
+
     progressBar->setVisible(false);
-    
-    if (fpga_configured_) {
+
+    if (fpga_processor_) {
         statusLabel->setText("FPGA configured successfully!");
         statusLabel->setStyleSheet("font-size: 12px;");
         accept(); // Close dialog with success
@@ -169,8 +168,10 @@ void FpgaDeviceDialog::onSelectClicked()
     }
 }
 
-bool FpgaDeviceDialog::configureFpga(const std::string& serial)
+std::unique_ptr<FpgaProcessor> FpgaDeviceDialog::configureFpga(const std::string& serial)
 {
+    (void)serial; // FpgaProcessor::initialize opens the first available device
+
     // Find bitfile
     std::string bitfile_path;
     const char* paths[] = {
@@ -179,34 +180,26 @@ bool FpgaDeviceDialog::configureFpga(const std::string& serial)
         "../../lib/detection.bit",
         "/Users/antonmelnychuk/workspace/pipeline/data-analyser/lib/detection.bit"
     };
-    
+
     for (const char* path : paths) {
         if (std::filesystem::exists(path)) {
             bitfile_path = std::filesystem::absolute(path).string();
             break;
         }
     }
-    
+
     if (bitfile_path.empty()) {
         std::cerr << "[FPGA] Bitfile not found" << std::endl;
-        return false;
+        return nullptr;
     }
-    
-    // Open device
-    OkFrontPanel device;
-    int rc = device.openBySerial(serial);
-    if (rc != OkFrontPanel::NoError) {
-        std::cerr << "[FPGA] Failed to open device: " << OkFrontPanel::getErrorString(rc) << std::endl;
-        return false;
+
+    // Create FpgaProcessor and keep it alive — do NOT close the device after configuration
+    auto processor = std::make_unique<FpgaProcessor>();
+    if (!processor->initialize(bitfile_path)) {
+        std::cerr << "[FPGA] Initialization failed: " << processor->getLastError() << std::endl;
+        return nullptr;
     }
-    
-    // Configure FPGA
-    rc = device.configureFPGA(bitfile_path);
-    if (rc != OkFrontPanel::NoError) {
-        std::cerr << "[FPGA] ConfigureFPGA failed: " << OkFrontPanel::getErrorString(rc) << std::endl;
-        return false;
-    }
-    
+
     std::cerr << "[FPGA] Successfully configured device: " << serial << std::endl;
-    return true;
+    return processor;
 }

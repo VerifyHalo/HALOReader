@@ -44,15 +44,16 @@
 // See fpga/halo_seizure datapath `define`s:
 //   THRESHOLD_VALUE, WINDOW_TIMEOUT, TRANSITION_COUNT, CHANNELS_PER_PACKET.
 // Default values match seizure_vivado/run_tests.py defaults:
-static const int kCfgThresholdValue    = 150000;
-static const int kCfgWindowTimeout     = 300;
+static const int kCfgThresholdValue    = 500000;
+static const int kCfgWindowTimeout     = 500;      // 500ms quiet required to fire END
 static const int kCfgTransitionCount   = 50;
+static const int kNumActiveChannels    = 10;        // must match FpgaProcessor::MAX_ACTIVE_CHANNELS
 
 #include <QVector>
 #include <chrono>
 #include <algorithm>
 
-SeizureAnalyzer::SeizureAnalyzer(QWidget *parent)
+SeizureAnalyzer::SeizureAnalyzer(std::unique_ptr<FpgaProcessor> fpgaProcessor, QWidget *parent)
     : QMainWindow(parent)
     , centralWidget(nullptr)
     , updateTimer(nullptr)
@@ -63,6 +64,7 @@ SeizureAnalyzer::SeizureAnalyzer(QWidget *parent)
     , processingThread(nullptr)
     , processorWorker(nullptr)
     , isProcessing(false)
+    , fpgaProcessor_(std::move(fpgaProcessor))
 {
     // Set window icon
     setWindowIcon(QIcon(":/app_icon.png"));
@@ -79,7 +81,7 @@ SeizureAnalyzer::SeizureAnalyzer(QWidget *parent)
     
     // Set up background processing thread
     processingThread = new QThread(this);
-    processorWorker = new FileProcessorWorker();
+    processorWorker = new FileProcessorWorker(fpgaProcessor_.get());
     processorWorker->moveToThread(processingThread);
     
     // Connect worker signals
@@ -133,7 +135,7 @@ void SeizureAnalyzer::setupUI()
     QLabel *thresholdLabel = new QLabel("Threshold:", paramsGroupBox);
     thresholdLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     thresholdSpinBox = new QSpinBox(paramsGroupBox);
-    thresholdSpinBox->setRange(0, 1000000);
+    thresholdSpinBox->setRange(0, 500000000);
     thresholdSpinBox->setValue(kCfgThresholdValue);
     thresholdSpinBox->setToolTip("NEO threshold (Max ADC = 65535)");
     thresholdSpinBox->setFixedWidth(120);
@@ -207,13 +209,20 @@ void SeizureAnalyzer::setupUI()
     stopButton->setToolTip("Stop Processing");
     stopButton->setStyleSheet("QPushButton { color: red; } QPushButton:disabled { color: gray; }");
     connect(stopButton, &QPushButton::clicked, this, &SeizureAnalyzer::onStopClicked);
-    
+
+    cleanOutputsButton = new QPushButton("🗑", dataFolderGroupBox);
+    cleanOutputsButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    cleanOutputsButton->setEnabled(false); // Disabled until data folder is selected
+    cleanOutputsButton->setToolTip("Delete all FPGA detection output files");
+    connect(cleanOutputsButton, &QPushButton::clicked, this, &SeizureAnalyzer::onCleanOutputsClicked);
+
     // Make buttons square - get height from startButton and set width to match
     // We'll set this after the button is shown, but for now set a reasonable size
     int buttonHeight = startButton->sizeHint().height();
     startButton->setFixedSize(buttonHeight, buttonHeight);
     stopButton->setFixedSize(buttonHeight, buttonHeight);
-    
+    cleanOutputsButton->setFixedSize(buttonHeight, buttonHeight);
+
     // Create horizontal layout for data folder input + buttons
     QHBoxLayout *dataFolderRowLayout = new QHBoxLayout();
     dataFolderRowLayout->setSpacing(10);
@@ -222,6 +231,7 @@ void SeizureAnalyzer::setupUI()
     dataFolderRowLayout->addWidget(dataFolderButton);
     dataFolderRowLayout->addWidget(startButton);
     dataFolderRowLayout->addWidget(stopButton);
+    dataFolderRowLayout->addWidget(cleanOutputsButton);
     
     dataFolderGroupLayout->addWidget(dataFolderLabel, 0, 0);
     dataFolderGroupLayout->addLayout(dataFolderRowLayout, 0, 1);
@@ -310,7 +320,7 @@ void SeizureAnalyzer::setupUI()
     popupLayout->setContentsMargins(4,4,4,4);
     channelList = new QListWidget(channelPopup);
     channelList->setSelectionMode(QAbstractItemView::NoSelection);
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < kNumActiveChannels; ++i) {
         QString channelName = QString("A-%1").arg(i, 3, 10, QChar('0'));
         QListWidgetItem *item = new QListWidgetItem(channelName, channelList);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
@@ -400,8 +410,6 @@ void SeizureAnalyzer::reloadData()
     // Scan for detection files in the data directory
     if (!dataDirectory.isEmpty()) {
         scanDetectionFiles();
-        // Also process any new RHD files
-        processNewRhdFiles();
     }
     updateDisplay();
     // Update daily counts based on selected channels
@@ -809,6 +817,9 @@ void SeizureAnalyzer::selectDataFolder()
         if (stopButton) {
             stopButton->setEnabled(false); // Stop button disabled when not processing
         }
+        if (cleanOutputsButton) {
+            cleanOutputsButton->setEnabled(true);
+        }
         
         // Don't auto-start processing - user must click Start button
         // startContinuousProcessing(); // Removed - user controls via button
@@ -830,6 +841,7 @@ void SeizureAnalyzer::updateProcessingStatusLabel(int processedCount, int proces
     }
     
     
+    processingStatusLabel->setStyleSheet("font-size: 11px; color: #666;");
     if (totalFiles == 0) {
         processingStatusLabel->setText("No RHD files found");
     } else if (totalFiles == 1) {
@@ -892,6 +904,40 @@ void SeizureAnalyzer::onStopClicked()
     }
 }
 
+void SeizureAnalyzer::onCleanOutputsClicked()
+{
+    if (dataDirectory.isEmpty()) return;
+
+    int ret = QMessageBox::question(this, "Clean Outputs",
+        "Delete all FPGA detection output files (ch*_*.txt) in:\n" + dataDirectory + "\n\nThis cannot be undone.",
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (ret != QMessageBox::Yes) return;
+
+    QDir root(dataDirectory);
+    QStringList subDirs = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    int deletedFiles = 0;
+    for (const QString &sub : subDirs) {
+        QDir subDir(root.filePath(sub));
+        QStringList txtFiles = subDir.entryList(QStringList() << "ch*_*.txt", QDir::Files);
+        for (const QString &f : txtFiles) {
+            if (subDir.remove(f))
+                ++deletedFiles;
+        }
+        // Remove the subdirectory if it is now empty (call on parent with relative name)
+        if (subDir.entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty() &&
+            subDir.entryList(QDir::Dirs  | QDir::NoDotAndDotDot).isEmpty()) {
+            root.rmdir(sub);
+        }
+    }
+
+    // Clear in-memory detections and refresh
+    allDetections.clear();
+    processedRhdFiles.clear();
+    updateDisplay();
+    processingStatusLabel->setText("Processed 0 / 0 RHD files");
+    qDebug() << "Clean outputs: deleted" << deletedFiles << "files";
+}
+
 void SeizureAnalyzer::onDataDirectoryChanged(const QString &path)
 {
     // Directory changed, check for new RHD files and detection files
@@ -908,9 +954,11 @@ void SeizureAnalyzer::onDataDirectoryChanged(const QString &path)
     // This handles nested folder structures (e.g., data_260131_034802/data_260131_034802/)
     scanDetectionFiles();
     updateDisplay();
-    
-    // Process new RHD files
-    processNewRhdFiles();
+
+    // Only process new RHD files if the user has explicitly started processing
+    if (processingTimer && processingTimer->isActive()) {
+        processNewRhdFiles();
+    }
 }
 
 void SeizureAnalyzer::processNewRhdFiles()
@@ -1035,12 +1083,13 @@ void SeizureAnalyzer::onFileProcessed(const QString& filePath, bool success, con
     
     if (success) {
         qDebug() << "Successfully processed:" << filePath;
-        
+
         // Rescan detection files to pick up new results
         scanDetectionFiles();
         updateDisplay();
-            } else {
+    } else {
         qWarning() << "Failed to process" << filePath << ":" << error;
+        updateProcessingStatus(false);
     }
     
     // Update processing status label
@@ -1062,6 +1111,9 @@ void SeizureAnalyzer::onFileProcessed(const QString& filePath, bool success, con
             }
             int processableFiles = totalFiles > 1 ? totalFiles - 1 : totalFiles;
             updateProcessingStatusLabel(processedCount, processableFiles, totalFiles);
+            if (success && processingStatusLabel) {
+                processingStatusLabel->setStyleSheet("color: green; font-size: 11px;");
+            }
         }
     }
 }
@@ -1623,7 +1675,7 @@ bool loadRhdFile(const QString& rhdPath,
             qWarning() << "loadRhdFile:" << error;
             return false;
         }
-        
+
         if (channelIndex >= int(rhdData.amplifier_data.size())) {
             error = QString("Channel index %1 exceeds amplifier_data size (%2)").arg(channelIndex).arg(rhdData.amplifier_data.size());
             qWarning() << "loadRhdFile:" << error;
@@ -1662,18 +1714,18 @@ bool loadRhdFile(const QString& rhdPath,
         
         // Extract channel data and convert to microvolts
         const auto& channelData = rhdData.amplifier_data[channelIndex];
-        
+
         // Check if channel data is valid
         if (channelData.empty()) {
             error = QString("Channel %1 has no data in RHD file: %2").arg(channelIndex).arg(rhdPath);
             qWarning() << "loadRhdFile:" << error;
             return false;
         }
-        
+
         if (channelData.size() != rhdData.num_samples) {
             qWarning() << "loadRhdFile: Channel data size mismatch. Expected:" << rhdData.num_samples << "Got:" << channelData.size();
         }
-        
+
         // Convert ADC codes to microvolts (Intan ADC: 0.195 μV per LSB, offset at 32768)
         uint32_t numSamples = std::min(static_cast<uint32_t>(channelData.size()), rhdData.num_samples);
         qDebug() << "loadRhdFile: Processing" << numSamples << "samples for channel" << channelIndex;
@@ -1948,25 +2000,27 @@ void SeizureAnalyzer::openRawForDetection(const SeizureRange& detection)
     for (const SeizureRange& det : fileDetections) {
         qint64 detStartMs2 = det.start.toMSecsSinceEpoch();
         qint64 detEndMs2 = det.end.toMSecsSinceEpoch();
-        
-        // Find sample indices
+
+        // "No end" means the detection ran to end of recording (end == start placeholder)
+        bool noEnd = (det.end == det.start);
+
+        // Find start sample index
         int startIdx = -1;
-        int endIdx = -1;
-        
+        int endIdx = waveformTsMs.size() - 1; // default: to end of file
+
         for (int i = 0; i < waveformTsMs.size(); ++i) {
             if (startIdx < 0 && waveformTsMs[i] >= detStartMs2) {
                 startIdx = i;
             }
-            if (waveformTsMs[i] <= detEndMs2) {
+            if (!noEnd && waveformTsMs[i] <= detEndMs2) {
                 endIdx = i;
             }
         }
-        
+
         if (startIdx >= 0 && endIdx > startIdx) {
             DetectionRegion region;
             region.startIndex = startIdx;
             region.endIndex = endIdx;
-            // Highlight the clicked detection
             region.isHighlighted = (detStartMs2 == detStartMs && detEndMs2 == detEndMs);
             regions.append(region);
         }

@@ -22,6 +22,7 @@ typedef int (*okFrontPanel_UpdateWireOuts_t)(void*);
 typedef unsigned long (*okFrontPanel_GetWireOutValue_t)(void*, int);
 typedef long (*okFrontPanel_WriteToPipeIn_t)(void*, int, long, unsigned char*);
 typedef long (*okFrontPanel_ReadFromPipeOut_t)(void*, int, long, unsigned char*);
+typedef long (*okFrontPanel_ReadFromBlockPipeOut_t)(void*, int, int, long, unsigned char*);
 
 #ifdef _WIN32
 static HMODULE g_lib_handle = nullptr;
@@ -40,6 +41,7 @@ static okFrontPanel_UpdateWireOuts_t g_UpdateWireOuts = nullptr;
 static okFrontPanel_GetWireOutValue_t g_GetWireOutValue = nullptr;
 static okFrontPanel_WriteToPipeIn_t g_WriteToPipeIn = nullptr;
 static okFrontPanel_ReadFromPipeOut_t g_ReadFromPipeOut = nullptr;
+static okFrontPanel_ReadFromBlockPipeOut_t g_ReadFromBlockPipeOut = nullptr;
 
 static bool loadLibrary() {
     if (g_lib_handle) return true;
@@ -85,7 +87,8 @@ static bool loadLibrary() {
     g_GetWireOutValue = (okFrontPanel_GetWireOutValue_t)GetProcAddress(g_lib_handle, "okFrontPanel_GetWireOutValue");
     g_WriteToPipeIn = (okFrontPanel_WriteToPipeIn_t)GetProcAddress(g_lib_handle, "okFrontPanel_WriteToPipeIn");
     g_ReadFromPipeOut = (okFrontPanel_ReadFromPipeOut_t)GetProcAddress(g_lib_handle, "okFrontPanel_ReadFromPipeOut");
-    
+    g_ReadFromBlockPipeOut = (okFrontPanel_ReadFromBlockPipeOut_t)GetProcAddress(g_lib_handle, "okFrontPanel_ReadFromBlockPipeOut");
+
     if (!g_Construct || !g_Destruct || !g_GetDeviceCount || !g_GetDeviceListSerial ||
         !g_OpenBySerial || !g_ConfigureFPGA || !g_SetWireInValue || !g_UpdateWireIns ||
         !g_UpdateWireOuts || !g_GetWireOutValue || !g_WriteToPipeIn || !g_ReadFromPipeOut) {
@@ -129,7 +132,8 @@ static bool loadLibrary() {
     g_GetWireOutValue = (okFrontPanel_GetWireOutValue_t)dlsym(g_lib_handle, "okFrontPanel_GetWireOutValue");
     g_WriteToPipeIn = (okFrontPanel_WriteToPipeIn_t)dlsym(g_lib_handle, "okFrontPanel_WriteToPipeIn");
     g_ReadFromPipeOut = (okFrontPanel_ReadFromPipeOut_t)dlsym(g_lib_handle, "okFrontPanel_ReadFromPipeOut");
-    
+    g_ReadFromBlockPipeOut = (okFrontPanel_ReadFromBlockPipeOut_t)dlsym(g_lib_handle, "okFrontPanel_ReadFromBlockPipeOut");
+
     if (!g_Construct || !g_Destruct || !g_GetDeviceCount || !g_GetDeviceListSerial ||
         !g_OpenBySerial || !g_ConfigureFPGA || !g_SetWireInValue || !g_UpdateWireIns ||
         !g_UpdateWireOuts || !g_GetWireOutValue || !g_WriteToPipeIn || !g_ReadFromPipeOut) {
@@ -229,8 +233,40 @@ std::vector<uint8_t> OkFrontPanel::readFromPipeOut(uint32_t ep, size_t length) {
     result.resize(length);
     long bytes_read = g_ReadFromPipeOut(handle_, ep, length, result.data());
     if (bytes_read < 0) {
+        std::cerr << "[PipeOut] ep=0x" << std::hex << ep << std::dec
+                  << " requested=" << length << " error=" << bytes_read << std::endl;
         result.clear();
     } else {
+        if (bytes_read > 0) {
+            std::cerr << "[PipeOut] ep=0x" << std::hex << ep << std::dec
+                      << " read=" << bytes_read << " bytes" << std::endl;
+        }
+        result.resize(bytes_read);
+    }
+    return result;
+}
+
+std::vector<uint8_t> OkFrontPanel::readFromBlockPipeOut(uint32_t ep, size_t block_size, size_t length) {
+    std::vector<uint8_t> result;
+    if (!handle_ || !g_ReadFromBlockPipeOut) {
+        std::cerr << "[BlockPipeOut] function not loaded" << std::endl;
+        return result;
+    }
+
+    // length must be a multiple of block_size
+    size_t aligned_length = ((length + block_size - 1) / block_size) * block_size;
+    result.resize(aligned_length);
+    long bytes_read = g_ReadFromBlockPipeOut(handle_, ep, static_cast<int>(block_size), aligned_length, result.data());
+    if (bytes_read < 0) {
+        std::cerr << "[BlockPipeOut] ep=0x" << std::hex << ep << std::dec
+                  << " block=" << block_size << " requested=" << aligned_length
+                  << " error=" << bytes_read << std::endl;
+        result.clear();
+    } else {
+        if (bytes_read > 0) {
+            std::cerr << "[BlockPipeOut] ep=0x" << std::hex << ep << std::dec
+                      << " read=" << bytes_read << " bytes" << std::endl;
+        }
         result.resize(bytes_read);
     }
     return result;

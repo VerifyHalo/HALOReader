@@ -5,13 +5,16 @@
 #include <QString>
 #include <QMutex>
 #include <QWaitCondition>
+#include <memory>
+#include "../core/fpga_processor.h"
+#include "../core/seizure_processor.h"
 
 class FileProcessorWorker : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit FileProcessorWorker(QObject *parent = nullptr);
+    explicit FileProcessorWorker(FpgaProcessor* fpgaProcessor, QObject *parent = nullptr);
     ~FileProcessorWorker();
 
 public slots:
@@ -23,6 +26,8 @@ signals:
     void finished();
 
 private:
+    FpgaProcessor* fpgaProcessor_;                  // non-owning, kept alive by SeizureAnalyzer
+    std::unique_ptr<SeizureProcessor> processor_;   // persistent, lazy-initialized
     bool shouldStop_;
     QMutex mutex_;
 };
