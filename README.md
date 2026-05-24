@@ -1,6 +1,6 @@
-# HALOReader — HALO Seizure Detection Pipeline
+# HALOReader
 
-**HALOReader** is the host-side C++/Qt application that drives the HALO Brain-Computer Interface seizure detection system. It reads neural recordings from Intan RHD files, streams them to an Opal Kelly XEM7310 FPGA running the HALO bitstream (`detection.bit`), and parses the seizure-start / seizure-end events that come back out.
+HALOReader is the host-side C++/Qt application that drives the HALO Brain-Computer Interface seizure detection system. It reads neural recordings from Intan RHD files, streams them to an Opal Kelly XEM7310 FPGA running the HALO bitstream (`detection.bit`), and parses the seizure-start / seizure-end events that come back out.
 
 This document walks through the full in → FPGA → out path with the relevant code at each step, then notes every overflow or correctness concern found in the implementation.
 
